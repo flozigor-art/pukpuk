@@ -1,0 +1,46 @@
+# VPS: crm-server behind a reverse proxy with TLS.
+#
+#   cp .env.example .env    # fill in CRM_PUBLIC_URL and CRM_NODE_TOKEN
+#   docker compose up -d --build                  # if you already have nginx/Caddy on the host
+#   docker compose --profile caddy up -d --build  # or let the bundled Caddy get HTTPS certificates
+#
+# Initial passwords: docker compose exec crm cat /data/initial-passwords.txt
+
+services:
+  crm:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile
+    image: langplant-crm-server:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CRM_ADDR: ":8080"
+      CRM_DATA_DIR: /data
+    volumes:
+      - crm-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 384m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    profiles: ["caddy"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [crm]
+
+volumes:
+  crm-data:
+  caddy-data:
+  caddy-config:

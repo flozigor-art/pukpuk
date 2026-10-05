@@ -1,0 +1,27 @@
+# systemd unit for running crm-server without Docker (smallest footprint).
+#   install -m755 crm-server /usr/local/bin/
+#   useradd -r -s /usr/sbin/nologin -d /var/lib/langplant-crm crm && mkdir -p /var/lib/langplant-crm && chown crm: /var/lib/langplant-crm
+#   cp .env /etc/langplant-crm.env && chmod 600 /etc/langplant-crm.env
+#   systemctl enable --now crm-server
+[Unit]
+Description=LangPlant CRM server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=crm
+EnvironmentFile=/etc/langplant-crm.env
+Environment=CRM_ADDR=127.0.0.1:8080
+Environment=CRM_DATA_DIR=/var/lib/langplant-crm
+ExecStart=/usr/local/bin/crm-server
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/langplant-crm
+PrivateTmp=true
+MemoryMax=384M
+
+[Install]
+WantedBy=multi-user.target

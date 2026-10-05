@@ -1,0 +1,22 @@
+# Storage PC: crm-node keeps the archive and dials out to the VPS.
+# No ports are opened; works behind NAT / grey IP.
+#
+#   cp .env.example .env    # NODE_SERVER_URL, NODE_TOKEN, STORAGE_PATH
+#   docker compose up -d --build
+#   docker compose logs -f
+
+services:
+  crm-node:
+    build:
+      context: ../..
+      dockerfile: deploy/node/Dockerfile
+    image: langplant-crm-node:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_DATA_DIR: /storage
+    volumes:
+      - ${STORAGE_PATH:-./storage}:/storage
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

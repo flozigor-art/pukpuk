@@ -1,0 +1,10 @@
+**/node_modules
+web/.vite
+data
+storage
+bin
+internal/webui/dist/assets
+internal/webui/dist/*.html
+deploy/**/.env
+deploy/**/storage
+.git

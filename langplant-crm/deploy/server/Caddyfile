@@ -1,0 +1,22 @@
+# Automatic HTTPS. Caddy streams request and response bodies without
+# buffering, so uploads, downloads, SSE and WebSockets work out of the box.
+{$CRM_DOMAIN} {
+	encode zstd gzip {
+		match {
+			header Content-Type text/*
+			header Content-Type application/json*
+			header Content-Type application/javascript*
+			header Content-Type image/svg+xml*
+		}
+	}
+	request_body /api/uploads/* {
+		max_size 32MB
+	}
+	reverse_proxy crm:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 2h
+			write_timeout 2h
+		}
+	}
+}

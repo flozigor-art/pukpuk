@@ -1,0 +1,10 @@
+/data/
+/storage/
+/bin/
+/web/node_modules/
+/web/.vite/
+/internal/webui/dist/*
+!/internal/webui/dist/.keep
+*.log
+.env
+/dist/
