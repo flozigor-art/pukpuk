@@ -59,121 +59,132 @@ export default function Dashboard() {
           foot={plan.missed_row > 0 ? `${plan.missed_row} ${plural(plan.missed_row, 'день', 'дня', 'дней')} подряд без публикации` : 'вчера всё по плану'}
         />
 
-        <div className="card span-7">
-          <div className="card-head">
-            <Archive size={16} />
-            <h3>Архив материалов</h3>
-            <span className="muted small">финал, чистый голос и дорожка без голоса · 48 ч после публикации</span>
-          </div>
-          <div className="card-body">
-            {data.archive.length === 0 ? (
-              <div className="row muted" style={{ padding: '10px 0' }}>
-                <CircleCheck size={17} color="var(--accent)" /> По всем опубликованным роликам архив собран
-              </div>
-            ) : (
-              <div className="list">
-                {data.archive.map((v) => {
-                  const left = v.archive.deadline_at ? fmtLeft(v.archive.deadline_at) : null
-                  const missingKinds = [...new Set(v.variants.flatMap((x) => (x.first_published_at ? x.missing : [])))]
-                  return (
-                    <Link to={`/videos/${v.id}`} key={v.id} className="list-row">
-                      <Thumb sha={v.thumb} size="sm" />
-                      <div className="grow">
-                        <div className="title ellipsis">
-                          <span className="code">{v.code}</span> {v.title}
-                        </div>
-                        <div className="small muted ellipsis">Не хватает: {missingKinds.map((k) => d.kindByKey.get(k)?.name ?? k).join(', ')}</div>
-                      </div>
-                      {left && <span className={clsx('chip', left.overdue ? 'red' : left.urgent ? 'amber' : '')}>{left.text}</span>}
-                    </Link>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="card span-5">
-          <div className="card-head">
-            <Clock size={16} />
-            <h3>Активность</h3>
-          </div>
-          <div className="card-body" style={{ maxHeight: 360, overflowY: 'auto' }}>
-            {data.activity.length === 0 ? <div className="muted small">Пока пусто</div> : data.activity.slice(0, 14).map((a) => <FeedItem key={a.id} a={a} />)}
-          </div>
-        </div>
-
-        <div className="card span-7">
-          <div className="card-head">
-            <Layers size={16} />
-            <h3>В работе</h3>
-            <Link to="/videos?view=board" className="more btn ghost sm">
-              Доска
-            </Link>
-          </div>
-          <div className="card-body">
-            <div className="chips" style={{ marginBottom: 10 }}>
-              {d.activeStages.map((s) => (
-                <Link key={s.id} to={`/videos?stage=${s.id}`} className="chip">
-                  <span className="dot" style={{ background: s.color }} />
-                  {s.name}
-                  <b style={{ marginLeft: 2 }}>{data.stages[String(s.id)] ?? 0}</b>
+        <div className="span-7 dash-col">
+          <div className="card dash-archive">
+            <div className="card-head">
+              <Archive size={16} />
+              <h3>
+                Архив материалов
+                <span className="hint">финал, чистый голос и дорожка без голоса — в течение 48 ч после публикации</span>
+              </h3>
+              {data.archive.length > 0 && (
+                <Link to="/videos?pub=archive" className="more btn ghost sm">
+                  Все
                 </Link>
-              ))}
+              )}
             </div>
-            {data.in_work.length === 0 ? (
-              <div className="muted small">Нет роликов в работе</div>
-            ) : (
-              <div className="list">
-                {data.in_work.map((v) => (
-                  <Link to={`/videos/${v.id}`} key={v.id} className="list-row">
-                    <Thumb sha={v.thumb} size="sm" />
-                    <div className="grow">
-                      <div className="title ellipsis">
-                        <span className="code">{v.code}</span> {v.title}
-                      </div>
-                      <div className="small muted">
-                        {v.plan_date ? `план: ${relDay(v.plan_date)}` : 'без даты'}
-                        {v.check_total > 0 && ` · чек-лист ${v.check_done}/${v.check_total}`}
-                      </div>
-                    </div>
-                    <StagePill stage={v.stage_id ? d.stageById.get(v.stage_id) : null} size="sm" />
-                    {v.assignee_id && <Avatar user={d.userById.get(v.assignee_id)} size="sm" />}
+            <div className="card-body">
+              {data.archive.length === 0 ? (
+                <div className="row muted" style={{ padding: '10px 0' }}>
+                  <CircleCheck size={17} color="var(--accent)" /> По всем опубликованным роликам архив собран
+                </div>
+              ) : (
+                <div className="list">
+                  {data.archive.map((v) => {
+                    const left = v.archive.deadline_at ? fmtLeft(v.archive.deadline_at) : null
+                    const missingKinds = [...new Set(v.variants.flatMap((x) => (x.first_published_at ? x.missing : [])))]
+                    return (
+                      <Link to={`/videos/${v.id}`} key={v.id} className="list-row">
+                        <Thumb sha={v.thumb} size="sm" />
+                        <div className="grow">
+                          <div className="title clamp-m">
+                            <span className="code">{v.code}</span> {v.title}
+                          </div>
+                          <div className="small muted row-sub">
+                            {left && <span className={clsx('chip sm hide-d', left.overdue ? 'red' : left.urgent ? 'amber' : '')}>{left.text}</span>}
+                            <span className="ellipsis">нет: {missingKinds.map((k) => d.kindByKey.get(k)?.name ?? k).join(', ').toLowerCase()}</span>
+                          </div>
+                        </div>
+                        {left && <span className={clsx('chip sm hide-m', left.overdue ? 'red' : left.urgent ? 'amber' : '')}>{left.text}</span>}
+                      </Link>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="card dash-work">
+            <div className="card-head">
+              <Layers size={16} />
+              <h3>В работе</h3>
+              <Link to="/videos?view=board" className="more btn ghost sm">
+                Доска
+              </Link>
+            </div>
+            <div className="card-body">
+              <div className="chips" style={{ marginBottom: 10 }}>
+                {d.activeStages.map((s) => (
+                  <Link key={s.id} to={`/videos?stage=${s.id}`} className="chip">
+                    <span className="dot" style={{ background: s.color }} />
+                    {s.name}
+                    <b style={{ marginLeft: 2 }}>{data.stages[String(s.id)] ?? 0}</b>
                   </Link>
                 ))}
               </div>
-            )}
+              {data.in_work.length === 0 ? (
+                <div className="muted small">Нет роликов в работе</div>
+              ) : (
+                <div className="list">
+                  {data.in_work.map((v) => (
+                    <Link to={`/videos/${v.id}`} key={v.id} className="list-row">
+                      <Thumb sha={v.thumb} size="sm" />
+                      <div className="grow">
+                        <div className="title clamp-m">
+                          <span className="code">{v.code}</span> {v.title}
+                        </div>
+                        <div className="small muted">
+                          {v.plan_date ? `план: ${relDay(v.plan_date)}` : 'без даты'}
+                          {v.check_total > 0 && ` · чек-лист ${v.check_done}/${v.check_total}`}
+                        </div>
+                      </div>
+                      <StagePill stage={v.stage_id ? d.stageById.get(v.stage_id) : null} size="sm" />
+                      {v.assignee_id && <Avatar user={d.userById.get(v.assignee_id)} size="sm" />}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
-
-        <div className="card span-5">
-          <div className="card-head">
-            <HardDrive size={16} />
-            <h3>Хранилище</h3>
-            <Link to="/storage" className="more btn ghost sm">
-              Подробнее
-            </Link>
+        <div className="span-5 dash-col">
+          <div className="card dash-feed">
+            <div className="card-head">
+              <Clock size={16} />
+              <h3>Активность</h3>
+            </div>
+            <div className="card-body feed-scroll">
+              {data.activity.length === 0 ? <div className="muted small">Пока пусто</div> : data.activity.slice(0, 12).map((a) => <FeedItem key={a.id} a={a} />)}
+            </div>
           </div>
-          <div className="card-body form" style={{ gap: 12 }}>
-            <div className="row">
-              <span className={clsx('dot', data.storage.online ? 'on' : 'off')} />
-              <b>{data.storage.online ? 'Комп на связи' : 'Комп офлайн'}</b>
-              {!data.storage.online && data.storage.last_seen > 0 && <span className="muted small">был {fmtAgo(data.storage.last_seen)}</span>}
+          <div className="card dash-storage">
+            <div className="card-head">
+              <HardDrive size={16} />
+              <h3>Хранилище</h3>
+              <Link to="/storage" className="more btn ghost sm">
+                Подробнее
+              </Link>
             </div>
-            <div>
-              <div className="row small" style={{ marginBottom: 6 }}>
-                <span className="grow text-2">Буфер на сервере</span>
-                <span className="nums muted">
-                  {fmtBytes(data.storage.buffer_used)} / {fmtBytes(data.storage.buffer_max)}
-                </span>
+            <div className="card-body form" style={{ gap: 12 }}>
+              <div className="row">
+                <span className={clsx('dot', data.storage.online ? 'on' : 'off')} />
+                <b>{data.storage.online ? 'Комп на связи' : 'Комп офлайн'}</b>
+                {!data.storage.online && data.storage.last_seen > 0 && <span className="muted small">был {fmtAgo(data.storage.last_seen)}</span>}
               </div>
-              <Progress value={data.storage.buffer_used / data.storage.buffer_max} tone={data.storage.buffer_used / data.storage.buffer_max > 0.8 ? 'red' : 'blue'} />
-            </div>
-            <div className="small text-2">
-              {data.storage.pending_count > 0
-                ? `Ждут переноса на комп: ${data.storage.pending_count} ${plural(data.storage.pending_count, 'файл', 'файла', 'файлов')} (${fmtBytes(data.storage.pending_bytes)})`
-                : 'Все файлы перенесены на комп'}
-              {data.storage.missing_count > 0 && <div style={{ color: 'var(--red-text)' }}>Потеряно файлов: {data.storage.missing_count}</div>}
+              <div>
+                <div className="row small" style={{ marginBottom: 6 }}>
+                  <span className="grow text-2">Буфер на сервере</span>
+                  <span className="nums muted">
+                    {fmtBytes(data.storage.buffer_used)} / {fmtBytes(data.storage.buffer_max)}
+                  </span>
+                </div>
+                <Progress value={data.storage.buffer_used / data.storage.buffer_max} tone={data.storage.buffer_used / data.storage.buffer_max > 0.8 ? 'red' : 'blue'} />
+              </div>
+              <div className="small text-2">
+                {data.storage.pending_count > 0
+                  ? `Ждут переноса на комп: ${data.storage.pending_count} ${plural(data.storage.pending_count, 'файл', 'файла', 'файлов')} (${fmtBytes(data.storage.pending_bytes)})`
+                  : 'Все файлы перенесены на комп'}
+                {data.storage.missing_count > 0 && <div style={{ color: 'var(--red-text)' }}>Потеряно файлов: {data.storage.missing_count}</div>}
+              </div>
             </div>
           </div>
         </div>
@@ -223,7 +234,7 @@ function TodayCard({ plan, day }: { plan: PlanStats; day?: Day }) {
           )}
         </div>
       </div>
-      <div style={{ padding: '0 22px 18px' }}>
+      <div className="today-strip">
         <DayStrip days={plan.days} today={plan.today} onClick={() => nav('/calendar')} />
         <div className="legend" style={{ marginTop: 10 }}>
           <span>
@@ -291,16 +302,20 @@ export function FeedItem({ a, showVideo = true }: { a: Activity; showVideo?: boo
     <div className="feed-item">
       <Avatar user={u} size="sm" />
       <div className="grow" style={{ minWidth: 0 }}>
-        <b>{u?.name ?? 'Система'}</b> <ActivityText a={a} />
-        {showVideo && a.video_id && a.video_num != null && (
-          <>
-            {' · '}
-            <Link to={`/videos/${a.video_id}`} className="text-2" style={{ textDecoration: 'underline', textUnderlineOffset: 3, textDecorationColor: 'var(--border-strong)' }}>
-              {d.settings.code_prefix}-{String(a.video_num).padStart(4, '0')} {a.video_title}
-            </Link>
-          </>
-        )}
-        <div className="when">{fmtAgo(a.created_at)}</div>
+        <div className="what">
+          <b>{u?.name ?? 'Система'}</b> <ActivityText a={a} />
+        </div>
+        <div className="when">
+          {fmtAgo(a.created_at)}
+          {showVideo && a.video_id && a.video_num != null && (
+            <>
+              {' · '}
+              <Link to={`/videos/${a.video_id}`}>
+                {d.settings.code_prefix}-{String(a.video_num).padStart(4, '0')} {a.video_title}
+              </Link>
+            </>
+          )}
+        </div>
       </div>
     </div>
   )

@@ -171,6 +171,75 @@ export function TagPicker({ scope, value, onChange, trigger }: { scope: TagScope
   )
 }
 
+/**
+ * Tags laid out by group (genre, mood, tempo, usage…) as toggle chips, with a
+ * field to add a new tag to a group. Used in dialogs, where everything is
+ * visible at once instead of hidden in a scrolling popover.
+ */
+export function TagGroupsEditor({ scope, value, onChange }: { scope: TagScope; value: ID[]; onChange: (ids: ID[]) => void }) {
+  const d = useDicts()
+  const sel = new Set(value)
+  const toggle = (id: ID) => onChange(sel.has(id) ? value.filter((x) => x !== id) : [...value, id])
+  return (
+    <div className="tag-groups">
+      {d.groups(scope).map(({ group, tags }) => (
+        <div key={group?.id ?? 'none'} className="tag-group">
+          <span className="tg-name">{group?.name ?? 'Другое'}</span>
+          <div className="chips">
+            {tags.map((t) => (
+              <button key={t.id} type="button" className={clsx('chip', sel.has(t.id) && 'on')} onClick={() => toggle(t.id)} aria-pressed={sel.has(t.id)}>
+                {t.name}
+              </button>
+            ))}
+            <NewTag scope={scope} groupId={group?.id ?? null} onCreated={(id) => onChange([...value, id])} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function NewTag({ scope, groupId, onCreated }: { scope: TagScope; groupId: ID | null; onCreated: (id: ID) => void }) {
+  const [v, setV] = useState('')
+  const [open, setOpen] = useState(false)
+  const create = async () => {
+    const name = v.trim()
+    setOpen(false)
+    setV('')
+    if (!name) return
+    const res = await post<{ id: ID }>(`/dict/tags`, { scope, name, group_id: groupId })
+    await queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
+    onCreated(res.id)
+  }
+  if (!open)
+    return (
+      <button type="button" className="chip outline" onClick={() => setOpen(true)} aria-label="Новый тег">
+        <Plus size={12} />
+      </button>
+    )
+  return (
+    <input
+      className="chip-input"
+      autoFocus
+      value={v}
+      placeholder="новый тег"
+      onChange={(e) => setV(e.target.value)}
+      onBlur={create}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          create()
+        }
+        if (e.key === 'Escape') {
+          e.stopPropagation()
+          setV('')
+          setOpen(false)
+        }
+      }}
+    />
+  )
+}
+
 /** Language badges for a video: green = published, blue = planned, grey = in work. */
 export function LangBadges({ video }: { video: Video }) {
   return (

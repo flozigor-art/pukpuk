@@ -62,6 +62,16 @@ export default function Videos() {
   }, [data, q, stage, tag, lang, who, pub, sort, view])
 
   const filtered = !!(q || (stage && view === 'list') || tag || lang || who || pub)
+  const seg = (
+    <Seg
+      value={view}
+      onChange={setView}
+      options={[
+        { value: 'list', label: <List size={16} />, title: 'Список' },
+        { value: 'board', label: <Columns3 size={16} />, title: 'Доска по этапам' },
+      ]}
+    />
+  )
 
   return (
     <div className={clsx('page', view === 'board' && 'wide')}>
@@ -70,16 +80,9 @@ export default function Videos() {
           <h1>Ролики</h1>
           <div className="sub">{data ? `${data.length} всего` : ' '}</div>
         </div>
-        <div className="actions">
-          <Seg
-            value={view}
-            onChange={setView}
-            options={[
-              { value: 'list', label: <List size={15} />, title: 'Список' },
-              { value: 'board', label: <Columns3 size={15} />, title: 'Доска по этапам' },
-            ]}
-          />
-          <Button variant="primary" icon={<Plus size={16} />} onClick={() => newVideo()} className="hide-m">
+        <div className="actions hide-m">
+          {seg}
+          <Button variant="primary" icon={<Plus size={16} />} onClick={() => newVideo()}>
             Новый ролик
           </Button>
         </div>
@@ -90,65 +93,73 @@ export default function Videos() {
           <Search size={15} />
           <input className="input" placeholder="Поиск по названию или коду" value={q} onChange={(e) => set('q', e.target.value)} />
         </div>
-        {view === 'list' && (
-          <select className="select sm" style={{ width: 'auto' }} value={stage} onChange={(e) => set('stage', e.target.value)}>
-            <option value="">Все этапы</option>
-            {d.activeStages.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        )}
-        <select className="select sm" style={{ width: 'auto' }} value={pub} onChange={(e) => set('pub', e.target.value)}>
-          <option value="">Любой статус</option>
-          <option value="unpublished">Не опубликованы</option>
-          <option value="planned">Запланированы</option>
-          <option value="published">Опубликованы</option>
-          <option value="archive">Архив не собран</option>
-        </select>
-        <select className="select sm" style={{ width: 'auto' }} value={tag} onChange={(e) => set('tag', e.target.value)}>
-          <option value="">Все теги</option>
-          {d.groups('video').map(({ group, tags }) => (
-            <optgroup key={group?.id ?? 0} label={group?.name ?? 'Без группы'}>
-              {tags.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
+        <span className="hide-d">{seg}</span>
+        <div className="filters">
+          {view === 'list' && (
+            <select className={clsx('select sm', stage && 'on')} style={{ width: 'auto' }} value={stage} onChange={(e) => set('stage', e.target.value)}>
+              <option value="">Все этапы</option>
+              {d.activeStages.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
                 </option>
               ))}
-            </optgroup>
-          ))}
-        </select>
-        {d.activeLangs.length > 1 && (
-          <select className="select sm" style={{ width: 'auto' }} value={lang} onChange={(e) => set('lang', e.target.value)}>
-            <option value="">Все языки</option>
-            {d.activeLangs.map((l) => (
-              <option key={l.code} value={l.code}>
-                {l.flag} {l.name}
+            </select>
+          )}
+          <select className={clsx('select sm', pub && 'on')} style={{ width: 'auto' }} value={pub} onChange={(e) => set('pub', e.target.value)}>
+            <option value="">Любой статус</option>
+            <option value="unpublished">Не опубликованы</option>
+            <option value="planned">Запланированы</option>
+            <option value="published">Опубликованы</option>
+            <option value="archive">Архив не собран</option>
+          </select>
+          <select className={clsx('select sm', tag && 'on')} style={{ width: 'auto' }} value={tag} onChange={(e) => set('tag', e.target.value)}>
+            <option value="">Все теги</option>
+            {d.groups('video').map(({ group, tags }) => (
+              <optgroup key={group?.id ?? 0} label={group?.name ?? 'Без группы'}>
+                {tags.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          {d.activeLangs.length > 1 && (
+            <select className={clsx('select sm', lang && 'on')} style={{ width: 'auto' }} value={lang} onChange={(e) => set('lang', e.target.value)}>
+              <option value="">Все языки</option>
+              {d.activeLangs.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.flag} {l.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <select className={clsx('select sm', who && 'on')} style={{ width: 'auto' }} value={who} onChange={(e) => set('who', e.target.value)}>
+            <option value="">Все исполнители</option>
+            {d.users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
               </option>
             ))}
           </select>
-        )}
-        <select className="select sm" style={{ width: 'auto' }} value={who} onChange={(e) => set('who', e.target.value)}>
-          <option value="">Все исполнители</option>
-          {d.users.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.name}
-            </option>
-          ))}
-        </select>
-        {view === 'list' && (
-          <select className="select sm" style={{ width: 'auto' }} value={sort} onChange={(e) => set('sort', e.target.value)}>
-            <option value="num">Сначала новые</option>
-            <option value="plan">По дате публикации</option>
-            <option value="updated">Недавно изменённые</option>
-          </select>
-        )}
-        {filtered && (
-          <Button variant="ghost" size="sm" icon={<X size={14} />} onClick={() => setSp(view !== 'list' ? { view } : {}, { replace: true })}>
-            Сбросить
-          </Button>
-        )}
+          {view === 'list' && (
+            <select className="select sm" style={{ width: 'auto' }} value={sort} onChange={(e) => set('sort', e.target.value)}>
+              <option value="num">Сначала новые</option>
+              <option value="plan">По дате публикации</option>
+              <option value="updated">Недавно изменённые</option>
+            </select>
+          )}
+          {filtered && (
+            <Button variant="ghost" size="sm" icon={<X size={14} />} onClick={() => setSp(view !== 'list' ? { view } : {}, { replace: true })}>
+              Сбросить
+            </Button>
+          )}
+          {filtered && data && (
+            <span className="small muted nums" style={{ marginLeft: 'auto', whiteSpace: 'nowrap' }}>
+              {list.length} из {data.length}
+            </span>
+          )}
+        </div>
       </div>
 
       {isLoading ? (

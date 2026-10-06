@@ -49,6 +49,23 @@ export async function videoPoster(file: File): Promise<{ poster: Blob; thumb: Bl
   }
 }
 
+/** Profile picture: the centre square of an image, scaled to `side` px, as JPEG. */
+export async function squareJpeg(file: Blob, side = 256): Promise<Blob | null> {
+  try {
+    const bmp = await createImageBitmap(file)
+    const s = Math.min(bmp.width, bmp.height)
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = Math.min(side, s)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, canvas.width, canvas.height)
+    bmp.close()
+    return await new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.86))
+  } catch {
+    return null
+  }
+}
+
 export async function imageThumb(file: Blob): Promise<Blob | null> {
   try {
     const bmp = await createImageBitmap(file)
@@ -60,26 +77,41 @@ export async function imageThumb(file: Blob): Promise<Blob | null> {
   }
 }
 
-export async function audioPeaks(file: Blob, bins = 200): Promise<{ peaks: number[]; duration: number } | null> {
+/** Waveform resolution; the same as proto.WaveformBins on the server. */
+export const WAVEFORM_BINS = 1000
+
+/**
+ * Loudness (RMS) of WAVEFORM_BINS slices of the track, 0..100. Peaks of
+ * mastered music sit at the limiter ceiling almost everywhere; RMS follows the
+ * arrangement, so intro, verses, drops and breaks are visible.
+ */
+export async function audioPeaks(file: Blob, bins = WAVEFORM_BINS): Promise<{ peaks: number[]; duration: number } | null> {
   if (file.size > 80 * 1024 * 1024) return null
   try {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
     const ctx = new AC()
     const buf = await ctx.decodeAudioData(await file.arrayBuffer())
     ctx.close()
-    const data = buf.getChannelData(0)
-    const step = Math.max(1, Math.floor(data.length / bins))
+    const chans = Array.from({ length: Math.min(2, buf.numberOfChannels) }, (_, i) => buf.getChannelData(i))
+    const len = chans[0].length
+    const n = Math.min(bins, len)
     const raw: number[] = []
     let peak = 0
-    for (let i = 0; i < bins; i++) {
-      let m = 0
-      const end = Math.min(data.length, (i + 1) * step)
-      for (let j = i * step; j < end; j += 4) {
-        const v = Math.abs(data[j])
-        if (v > m) m = v
+    for (let i = 0; i < n; i++) {
+      const from = Math.floor((i * len) / n)
+      const to = Math.floor(((i + 1) * len) / n)
+      let sum = 0
+      let cnt = 0
+      for (let j = from; j < to; j += 2) {
+        let v = 0
+        for (const c of chans) v += c[j]
+        v /= chans.length
+        sum += v * v
+        cnt++
       }
-      raw.push(m)
-      if (m > peak) peak = m
+      const rms = Math.sqrt(sum / Math.max(1, cnt))
+      raw.push(rms)
+      if (rms > peak) peak = rms
     }
     return { peaks: raw.map((v) => (peak ? Math.round((v / peak) * 100) : 0)), duration: buf.duration * 1000 }
   } catch {

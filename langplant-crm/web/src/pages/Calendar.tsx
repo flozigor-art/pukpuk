@@ -6,7 +6,7 @@ import { Link, useNavigate } from 'react-router'
 import { useNewVideo } from '../components/Layout'
 import { Button, Field, IconButton, Loading, Modal, PlatformIcon, Seg, StagePill, Thumb, Toggle } from '../components/ui'
 import { api } from '../lib/api'
-import { addDays, dayAt, fmtDay, fmtTime, MONTHS_NOM, pad, today as todayStr, weekday, WEEKDAYS } from '../lib/format'
+import { addDays, dayAt, diffDays, fmtDay, fmtTime, MONTHS_NOM, pad, today as todayStr, weekday, WEEKDAYS } from '../lib/format'
 import { DAY_REASONS, DAY_STATUS, PUB_STATUS } from '../lib/labels'
 import { queryClient, useAction, useCalendar, useDicts, useVideos } from '../lib/queries'
 import type { CalItem, Day } from '../lib/types'
@@ -25,6 +25,9 @@ export default function Calendar() {
   const mobile = typeof window !== 'undefined' && window.innerWidth < 900
   const [view, setView] = useState<'month' | 'agenda'>(mobile ? 'agenda' : 'month')
   const [openDay, setOpenDay] = useState<string | null>(null)
+  // phones: tapping a day in the month selects it and lists it under the grid
+  const compact = typeof window !== 'undefined' && window.matchMedia('(max-width: 699px)').matches
+  const [sel, setSel] = useState(now)
 
   const [y, m] = month.split('-').map(Number)
   const first = `${month}-01`
@@ -48,22 +51,28 @@ export default function Calendar() {
           <h1>Календарь публикаций</h1>
           <div className="sub">План: {data?.quota ?? 1} новый уникальный ролик в день · отсчёт с {data?.start ? fmtDay(data.start, { long: true }) : '—'}</div>
         </div>
-        <div className="actions">
-          {view === 'month' && (
-            <div className="row" style={{ gap: 4 }}>
+        <div className="actions cal-actions">
+          {view === 'month' ? (
+            <div className="row" style={{ gap: 2 }}>
               <IconButton label="Предыдущий месяц" onClick={() => shift(-1)}>
                 <ChevronLeft size={18} />
               </IconButton>
-              <b style={{ minWidth: 130, textAlign: 'center' }}>
+              <b className="cal-month">
                 {MONTHS_NOM[m - 1]} {y}
               </b>
               <IconButton label="Следующий месяц" onClick={() => shift(1)}>
                 <ChevronRight size={18} />
               </IconButton>
-              <Button size="sm" onClick={() => setMonth(now.slice(0, 7))}>
-                Сегодня
-              </Button>
+              {month !== now.slice(0, 7) && (
+                <Button size="sm" onClick={() => setMonth(now.slice(0, 7))} style={{ marginLeft: 4 }}>
+                  Сегодня
+                </Button>
+              )}
             </div>
+          ) : (
+            <b className="cal-month hide-d" style={{ textAlign: 'left' }}>
+              Ближайшие недели
+            </b>
           )}
           <Seg
             value={view}
@@ -75,9 +84,9 @@ export default function Calendar() {
           />
         </div>
       </div>
-      <div className="legend" style={{ marginBottom: 12 }}>
+      <div className="legend cal-legend">
         <span>
-          <i style={{ background: 'var(--accent)', borderRadius: 99 }} /> вышел новый ролик
+          <i style={{ background: 'var(--accent)', borderRadius: 99 }} /> вышел<span className="hide-m"> новый ролик</span>
         </span>
         <span>
           <i style={{ background: 'var(--blue)', borderRadius: 99 }} /> запланирован
@@ -86,14 +95,27 @@ export default function Calendar() {
           <i style={{ background: 'var(--red)', borderRadius: 99 }} /> пропуск
         </span>
         <span>
-          <i style={{ background: 'var(--text-3)', borderRadius: 99 }} /> уважительная причина
+          <i style={{ background: 'var(--text-3)', borderRadius: 99 }} /> <span className="hide-m">уважительная </span>причина
         </span>
-        <span className="hide-m">Перетащите запланированный ролик на другой день, чтобы перенести</span>
+        {view === 'month' && <span className="hide-m" style={{ marginLeft: 'auto' }}>Перетащите запланированный ролик на другой день, чтобы перенести</span>}
       </div>
       {isLoading && !data ? (
         <Loading />
       ) : view === 'month' ? (
-        <MonthGrid from={gridFrom} to={gridTo} month={month} byDate={byDate} today={now} onOpen={setOpenDay} />
+        <>
+          <MonthGrid from={gridFrom} to={gridTo} month={month} byDate={byDate} today={now} selected={compact ? sel : null} onOpen={compact ? setSel : setOpenDay} />
+          {compact && byDate.get(sel) && (
+            <div className="card agenda" style={{ marginTop: 10 }}>
+              <div className="ag-month row" style={{ justifyContent: 'space-between' }}>
+                <span>{fmtDay(sel, { weekday: true, long: true })}</span>
+                <button className="btn sm ghost" style={{ margin: '-4px -8px', textTransform: 'none', letterSpacing: 0 }} onClick={() => setOpenDay(sel)}>
+                  День…
+                </button>
+              </div>
+              <AgendaDay day={byDate.get(sel)!} today={now} onOpen={setOpenDay} />
+            </div>
+          )}
+        </>
       ) : (
         <Agenda days={days} today={now} onOpen={setOpenDay} />
       )}
@@ -116,7 +138,7 @@ async function moveItem(item: CalItem, to: string) {
   queryClient.invalidateQueries({ queryKey: ['video', item.video_id] })
 }
 
-function MonthGrid({ from, to, month, byDate, today, onOpen }: { from: string; to: string; month: string; byDate: Map<string, Day>; today: string; onOpen: (d: string) => void }) {
+function MonthGrid({ from, to, month, byDate, today, selected, onOpen }: { from: string; to: string; month: string; byDate: Map<string, Day>; today: string; selected: string | null; onOpen: (d: string) => void }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } }))
   const dates: string[] = []
   for (let x = from; x <= to; x = addDays(x, 1)) dates.push(x)
@@ -135,19 +157,19 @@ function MonthGrid({ from, to, month, byDate, today, onOpen }: { from: string; t
           </div>
         ))}
         {dates.map((date) => (
-          <DayCell key={date} date={date} day={byDate.get(date)} other={!date.startsWith(month)} today={today} onOpen={onOpen} />
+          <DayCell key={date} date={date} day={byDate.get(date)} other={!date.startsWith(month)} today={today} selected={date === selected} onOpen={onOpen} />
         ))}
       </div>
     </DndContext>
   )
 }
 
-function DayCell({ date, day, other, today, onOpen }: { date: string; day?: Day; other: boolean; today: string; onOpen: (d: string) => void }) {
+function DayCell({ date, day, other, today, selected, onOpen }: { date: string; day?: Day; other: boolean; today: string; selected: boolean; onOpen: (d: string) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: date })
   const items = day?.items ?? []
   const color = day ? statusColor[day.status] : undefined
   return (
-    <div ref={setNodeRef} className={clsx('cal-day', other && 'other', date === today && 'is-today')} style={isOver ? { background: 'var(--blue-soft)' } : undefined} onClick={() => onOpen(date)}>
+    <div ref={setNodeRef} className={clsx('cal-day', other && 'other', date === today && 'is-today', selected && 'sel')} style={isOver ? { background: 'var(--blue-soft)' } : undefined} onClick={() => onOpen(date)}>
       <div className="num">
         <b>{Number(date.slice(8))}</b>
         {day?.status === 'excused' && <span className="tiny muted">{DAY_REASONS[day.reason] ?? 'причина'}</span>}
@@ -179,50 +201,61 @@ function CalChip({ item, date }: { item: CalItem; date: string }) {
       <Link to={`/videos/${item.video_id}`} className="t" onClick={(e) => isDragging && e.preventDefault()}>
         {item.title}
       </Link>
-      <span className="flags">
-        {platforms.slice(0, 3).map((pid) => (
-          <PlatformIcon key={pid} platform={pid ? d.platformById.get(pid) : undefined} size="sm" />
-        ))}
+      <span className="meta">
+        {item.pubs.length > 0 ? <span>{fmtTime(Math.min(...item.pubs.map((p) => p.at)))}</span> : <span className="code">{item.code}</span>}
+        <span className="flags">
+          {platforms.slice(0, 4).map((pid) => (
+            <PlatformIcon key={pid} platform={pid ? d.platformById.get(pid) : undefined} size="sm" />
+          ))}
+        </span>
       </span>
     </div>
   )
 }
 
+type AgendaRow = { kind: 'day'; day: Day } | { kind: 'free'; from: string; to: string }
+
 function Agenda({ days, today, onOpen }: { days: Day[]; today: string; onOpen: (d: string) => void }) {
   const newVideo = useNewVideo()
+  // past days only when something happened; runs of empty future days fold into one row
+  const rows: AgendaRow[] = []
+  for (const x of days) {
+    const past = x.date < today
+    if (past && !x.items.length && x.status !== 'missed' && x.status !== 'excused') continue
+    if (x.date > today && !x.items.length && !x.excused && !x.note) {
+      const last = rows[rows.length - 1]
+      if (last?.kind === 'free' && addDays(last.to, 1) === x.date) last.to = x.date
+      else rows.push({ kind: 'free', from: x.date, to: x.date })
+      continue
+    }
+    rows.push({ kind: 'day', day: x })
+  }
+  let month = ''
   return (
-    <div className="cal-agenda">
-      {days.map((x) => {
-        const past = x.date < today
-        if (past && !x.items.length && x.status !== 'missed') return null
+    <div className="card agenda">
+      {rows.map((r) => {
+        const date = r.kind === 'day' ? r.day.date : r.from
+        const head = date.slice(0, 7) !== month ? MONTHS_NOM[Number(date.slice(5, 7)) - 1] : null
+        month = date.slice(0, 7)
         return (
-          <div key={x.date} className={clsx('agenda-day', x.date === today && 'is-today')} onClick={() => onOpen(x.date)}>
-            <div className="date">
-              <span>{WEEKDAYS[weekday(x.date)]}</span>
-              <b>{Number(x.date.slice(8))}</b>
-              <span>{fmtDay(x.date).split(' ')[1]}</span>
-            </div>
-            <div className="grow" style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div className="row small" style={{ color: statusColor[x.status] ?? 'var(--text-3)', fontWeight: 600 }}>
-                {DAY_STATUS[x.status]}
-                {x.status === 'excused' && x.reason && ` · ${DAY_REASONS[x.reason]}`}
-              </div>
-              {x.items.map((it) => (
-                <AgendaItem key={it.video_id} item={it} />
-              ))}
-              {!x.items.length && !past && (
-                <button
-                  className="btn sm ghost"
-                  style={{ alignSelf: 'flex-start', marginLeft: -8 }}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    newVideo(x.date)
-                  }}
-                >
-                  <Plus size={14} /> ролик на этот день
+          <div key={date}>
+            {head && <div className="ag-month">{head}</div>}
+            {r.kind === 'free' ? (
+              <div className="ag-row ag-free">
+                <div className="ag-date">
+                  <b>{Number(r.from.slice(8))}</b>
+                  <span>{WEEKDAYS[weekday(r.from)]}</span>
+                </div>
+                <div className="grow muted small">
+                  {r.from === r.to ? 'Ничего не запланировано' : `Свободно до ${fmtDay(r.to)} · ${diffDays(r.to, r.from) + 1} дн.`}
+                </div>
+                <button className="btn sm ghost" onClick={() => newVideo(r.from)}>
+                  <Plus size={14} /> Ролик
                 </button>
-              )}
-            </div>
+              </div>
+            ) : (
+              <AgendaDay day={r.day} today={today} onOpen={onOpen} />
+            )}
           </div>
         )
       })}
@@ -230,16 +263,37 @@ function Agenda({ days, today, onOpen }: { days: Day[]; today: string; onOpen: (
   )
 }
 
+function AgendaDay({ day: x, today, onOpen }: { day: Day; today: string; onOpen: (d: string) => void }) {
+  return (
+    <div className={clsx('ag-row', x.date === today && 'is-today')} onClick={() => onOpen(x.date)}>
+      <div className="ag-date">
+        <b>{Number(x.date.slice(8))}</b>
+        <span>{WEEKDAYS[weekday(x.date)]}</span>
+      </div>
+      <div className="grow" style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div className="ag-status" style={{ color: statusColor[x.status] ?? 'var(--text-3)' }}>
+          {x.date === today && x.status !== 'today' ? `Сегодня · ${DAY_STATUS[x.status].toLowerCase()}` : DAY_STATUS[x.status]}
+          {x.status === 'excused' && x.reason && ` · ${DAY_REASONS[x.reason]}`}
+          {x.note && <span className="muted" style={{ fontWeight: 500 }}> · {x.note}</span>}
+        </div>
+        {x.items.map((it) => (
+          <AgendaItem key={it.video_id} item={it} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function AgendaItem({ item }: { item: CalItem }) {
   const d = useDicts()
   return (
-    <Link to={`/videos/${item.video_id}`} className="row" onClick={(e) => e.stopPropagation()} style={{ gap: 10 }}>
+    <Link to={`/videos/${item.video_id}`} className="ag-item" onClick={(e) => e.stopPropagation()}>
       <Thumb sha={item.thumb} size="sm" />
       <div className="grow" style={{ minWidth: 0 }}>
-        <div className="ellipsis" style={{ fontWeight: 600 }}>
+        <div className="clamp2" style={{ fontWeight: 600, lineHeight: 1.3 }}>
           {item.title}
         </div>
-        <div className="row tiny muted" style={{ gap: 6, whiteSpace: 'nowrap', overflow: 'hidden' }}>
+        <div className="row tiny muted" style={{ gap: 6, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden' }}>
           <span className="code">{item.code}</span>
           {item.pubs.length > 0 && (
             <>
@@ -252,9 +306,9 @@ function AgendaItem({ item }: { item: CalItem }) {
               <span>{[...new Set(item.pubs.map((p) => p.lang.toUpperCase()))].join(' · ')}</span>
             </>
           )}
+          {item.kind === 'pub' && <span>повторная публикация</span>}
         </div>
       </div>
-      <span className={clsx('chip sm', item.kind === 'first' ? 'green' : item.kind === 'planned' ? 'blue' : '')}>{item.kind === 'first' ? 'вышел' : item.kind === 'planned' ? 'план' : 'публикация'}</span>
     </Link>
   )
 }

@@ -2,12 +2,12 @@ import clsx from 'clsx'
 import { Check, Download, Ellipsis, Heart, ListChecks, Music as MusicIcon, Pause, Play, Search, Tag as TagIcon, Trash, Upload, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
-import { TagChips, TagPicker } from '../components/pickers'
+import { TagChips, TagGroupsEditor, TagPicker } from '../components/pickers'
 import { Button, Empty, Field, IconButton, Loading, Menu, MenuItem, MenuSep, Modal, PlatformIcon, Spinner, useConfirm, Waveform } from '../components/ui'
 import { derivedUrl, fileUrl } from '../lib/api'
 import { fmtBytes, fmtDuration, plural } from '../lib/format'
 import { readId3 } from '../lib/media'
-import { playTrack, seek, usePlayer, toggle } from '../lib/player'
+import { playTrack, scrub, seek, usePlayer, toggle } from '../lib/player'
 import { useAction, useDicts, useTrack, useTracks } from '../lib/queries'
 import type { ID, Track } from '../lib/types'
 import { enqueue } from '../lib/uploads'
@@ -78,30 +78,34 @@ export default function MusicPage() {
     if (fs.length) setPending(fs)
   }
   const filterCount = tagFilter.size + (fav ? 1 : 0) + (noLicense ? 1 : 0)
+  const toggleSelecting = () => {
+    setSelecting(!selecting)
+    setSel(new Set())
+  }
+  const fileInput = (
+    <input type="file" accept="audio/*,.mp3" multiple hidden onChange={(e) => {
+      pick(e.target.files)
+      e.target.value = ''
+    }} />
+  )
 
   return (
     <div className="page" onDragOver={(e) => e.preventDefault()} onDrop={(e) => {
       e.preventDefault()
       pick(e.dataTransfer.files)
     }}>
-      <div className="page-head">
-        <div className="hide-m">
+      <div className="page-head hide-m">
+        <div>
           <h1>Библиотека музыки</h1>
           <div className="sub">{data ? `${data.length} ${plural(data.length, 'трек', 'трека', 'треков')}` : ' '}</div>
         </div>
         <div className="actions">
-          <Button variant={selecting ? 'primary' : 'default'} icon={<ListChecks size={15} />} onClick={() => {
-            setSelecting(!selecting)
-            setSel(new Set())
-          }}>
+          <Button variant={selecting ? 'primary' : 'default'} icon={<ListChecks size={15} />} onClick={toggleSelecting}>
             {selecting ? 'Готово' : 'Выбрать'}
           </Button>
           <label className="btn primary">
             <Upload size={15} /> Загрузить MP3
-            <input type="file" accept="audio/*,.mp3" multiple hidden onChange={(e) => {
-              pick(e.target.files)
-              e.target.value = ''
-            }} />
+            {fileInput}
           </label>
         </div>
       </div>
@@ -111,53 +115,70 @@ export default function MusicPage() {
           <Search size={15} />
           <input className="input" placeholder="Название, исполнитель, заметки" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
-        <select className="select sm" style={{ width: 'auto' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
-          <option value="new">Сначала новые</option>
-          <option value="title">По названию</option>
-          <option value="artist">По исполнителю</option>
-          <option value="duration">По длительности</option>
-          <option value="bpm">По темпу (BPM)</option>
-        </select>
-        <button className={clsx('chip', fav && 'on')} onClick={() => setFav(!fav)}>
-          <Heart size={12} /> Избранное
-        </button>
-        <button className={clsx('chip', noLicense && 'on')} onClick={() => setNoLicense(!noLicense)}>
-          Без лицензии
-        </button>
-        <button className={clsx('chip', showFilters && 'on')} onClick={() => setShowFilters(!showFilters)}>
-          <TagIcon size={12} /> Теги{tagFilter.size ? ` · ${tagFilter.size}` : ''}
-        </button>
-        {filterCount > 0 && (
-          <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={() => {
-            setTagFilter(new Set())
-            setFav(false)
-            setNoLicense(false)
-          }}>
-            Сбросить
-          </Button>
-        )}
+        <div className="row hide-d" style={{ gap: 6 }}>
+          <IconButton label={selecting ? 'Готово' : 'Выбрать несколько'} active={selecting} onClick={toggleSelecting} className="boxed">
+            <ListChecks size={18} />
+          </IconButton>
+          <label className="icon-btn boxed primary" aria-label="Загрузить MP3">
+            <Upload size={18} />
+            {fileInput}
+          </label>
+        </div>
+        <div className="filters">
+          <select className="select sm" style={{ width: 'auto' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
+            <option value="new">Сначала новые</option>
+            <option value="title">По названию</option>
+            <option value="artist">По исполнителю</option>
+            <option value="duration">По длительности</option>
+            <option value="bpm">По темпу (BPM)</option>
+          </select>
+          <button className={clsx('chip lg', showFilters && 'on')} onClick={() => setShowFilters(!showFilters)}>
+            <TagIcon size={13} /> Теги{tagFilter.size ? ` · ${tagFilter.size}` : ''}
+          </button>
+          <button className={clsx('chip lg', fav && 'on')} onClick={() => setFav(!fav)}>
+            <Heart size={13} /> Избранное
+          </button>
+          <button className={clsx('chip lg', noLicense && 'on')} onClick={() => setNoLicense(!noLicense)}>
+            Без лицензии
+          </button>
+          {filterCount > 0 && (
+            <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={() => {
+              setTagFilter(new Set())
+              setFav(false)
+              setNoLicense(false)
+            }}>
+              Сбросить
+            </Button>
+          )}
+          <span className="muted small nums hide-m" style={{ marginLeft: 'auto' }}>
+            {list.length !== (data?.length ?? 0) && `${list.length} из ${data?.length}`}
+          </span>
+        </div>
       </div>
       {showFilters && (
-        <div className="card card-pad" style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {groups.map(({ group, tags }) => (
-            <div key={group?.id ?? 0} className="row" style={{ alignItems: 'flex-start' }}>
-              <span className="small muted" style={{ width: 110, flex: 'none', paddingTop: 3 }}>
-                {group?.name ?? 'Другое'}
-              </span>
-              <div className="chips">
-                {tags.map((t) => (
-                  <button key={t.id} className={clsx('chip', tagFilter.has(t.id) && 'on')} onClick={() => toggleTag(t.id)}>
-                    {t.name}
-                    <span className="muted" style={{ fontWeight: 500 }}>
-                      {(data ?? []).filter((x) => x.tags.includes(t.id)).length || ''}
-                    </span>
-                  </button>
-                ))}
-                {tags.length === 0 && <span className="small muted">нет тегов</span>}
+        <div className="card card-pad tag-filter" style={{ marginBottom: 12 }}>
+          <div className="tag-groups">
+            {groups.map(({ group, tags }) => (
+              <div key={group?.id ?? 0} className="tag-group">
+                <span className="tg-name">{group?.name ?? 'Другое'}</span>
+                <div className="chips">
+                  {tags.map((t) => {
+                    const n = (data ?? []).filter((x) => x.tags.includes(t.id)).length
+                    return (
+                      <button key={t.id} className={clsx('chip', tagFilter.has(t.id) && 'on')} onClick={() => toggleTag(t.id)}>
+                        {t.name}
+                        {n > 0 && <span className="n">{n}</span>}
+                      </button>
+                    )
+                  })}
+                  {tags.length === 0 && <span className="small muted">нет тегов</span>}
+                </div>
               </div>
-            </div>
-          ))}
-          <div className="tiny muted">Внутри группы — любой из выбранных тегов, между группами — все условия сразу. Теги и группы настраиваются в настройках.</div>
+            ))}
+          </div>
+          <div className="tiny muted" style={{ marginTop: 10 }}>
+            Внутри группы — любой из выбранных тегов, между группами — все условия сразу. Группы и теги — в <Link to="/settings?tab=tags" style={{ textDecoration: 'underline' }}>настройках</Link>.
+          </div>
         </div>
       )}
 
@@ -166,7 +187,7 @@ export default function MusicPage() {
       {isLoading ? (
         <Loading />
       ) : !data?.length ? (
-        <Empty icon={<MusicIcon size={22} />} title="Библиотека пуста" action={<label className="btn primary"><Upload size={15} /> Загрузить MP3<input type="file" accept="audio/*,.mp3" multiple hidden onChange={(e) => pick(e.target.files)} /></label>}>
+        <Empty icon={<MusicIcon size={22} />} title="Библиотека пуста" action={<label className="btn primary"><Upload size={15} /> Загрузить MP3{fileInput}</label>}>
           Перетащите сюда MP3 — название, исполнитель и обложка подтянутся из тегов файла
         </Empty>
       ) : list.length === 0 ? (
@@ -174,6 +195,16 @@ export default function MusicPage() {
       ) : (
         <div className="card" style={{ padding: 6 }}>
           <div className="tracks">
+            <div className="track thead hide-m" aria-hidden>
+              <span />
+              <span />
+              <span>Название</span>
+              <span>Теги</span>
+              <span>Волна</span>
+              <span>Время</span>
+              <span>BPM</span>
+              <span />
+            </div>
             {list.map((t) => (
               <TrackRow
                 key={t.id}
@@ -225,12 +256,20 @@ function TrackRow({ t, queue, selecting, selected, onSelect, onOpen }: { t: Trac
           </span>
         </div>
       </div>
-      <div className="hide-m" style={{ minWidth: 0, overflow: 'hidden' }}>
-        <TagChips ids={t.tags} max={3} />
-        {!t.license && <span className="chip sm amber" style={{ marginTop: t.tags.length ? 3 : 0 }}>нет лицензии</span>}
+      <div className="tags-cell hide-m">
+        {!t.license && <span className="chip sm amber">нет лицензии</span>}
+        <TagChips ids={t.tags} max={t.license ? 3 : 2} />
       </div>
       <div className="hide-m">
-        <Waveform peaks={t.peaks} progress={isCur && p.duration ? p.time / p.duration : 0} onSeek={(f) => (isCur ? seek(f) : playTrack(t, queue))} bars={54} height={26} />
+        <Waveform
+          peaks={t.peaks}
+          progress={isCur && p.duration ? p.time / p.duration : 0}
+          onSeek={(f) => (isCur ? seek(f) : playTrack(t, queue, f))}
+          onScrub={isCur ? scrub : undefined}
+          durationMs={isCur && p.duration ? p.duration : t.duration_ms}
+          height={28}
+          label={`Позиция в треке «${t.title}»`}
+        />
       </div>
       <div className="small muted nums hide-m">{fmtDuration(t.duration_ms)}</div>
       <div className="small muted nums hide-m">{t.bpm ?? ''}</div>
@@ -330,6 +369,7 @@ const SourcesList = () => (
 function TrackModal({ id, onClose }: { id: ID; onClose: () => void }) {
   const d = useDicts()
   const { data } = useTrack(id)
+  const player = usePlayer()
   const act = useAction()
   const confirm = useConfirm()
   const [form, setForm] = useState<Partial<Track> | null>(null)
@@ -337,6 +377,7 @@ function TrackModal({ id, onClose }: { id: ID; onClose: () => void }) {
     if (data && !form) setForm(data.track)
   }, [data, form])
   const t = data?.track
+  const isCur = !!t && player.track?.id === t.id
   if (!t || !form) {
     return (
       <Modal open onClose={onClose} title="Трек">
@@ -414,13 +455,20 @@ function TrackModal({ id, onClose }: { id: ID; onClose: () => void }) {
             {t.has_cover ? <img src={derivedUrl(t.sha256, 'thumb.jpg')} alt="" /> : <MusicIcon size={22} />}
           </div>
           <div className="grow" style={{ minWidth: 0 }}>
-            <Waveform peaks={t.peaks} bars={120} height={40} onSeek={() => playTrack(t)} />
-            <div className="tiny muted" style={{ marginTop: 4 }}>
+            <Waveform
+              peaks={t.peaks}
+              height={44}
+              progress={isCur && player.duration ? player.time / player.duration : 0}
+              onSeek={(f) => (isCur ? seek(f) : playTrack(t, undefined, f))}
+              onScrub={isCur ? scrub : undefined}
+              durationMs={isCur && player.duration ? player.duration : t.duration_ms}
+            />
+            <div className="tiny muted ellipsis" style={{ marginTop: 4 }}>
               {fmtDuration(t.duration_ms)} · {fmtBytes(t.size)} · {t.filename}
             </div>
           </div>
-          <button className="bigplay btn primary" style={{ width: 44, height: 44, borderRadius: '50%', padding: 0 }} onClick={() => playTrack(t)} aria-label="Играть">
-            <Play size={18} />
+          <button className="bigplay btn primary" style={{ width: 44, height: 44, borderRadius: '50%', padding: 0 }} onClick={() => playTrack(t)} aria-label={isCur && player.playing ? 'Пауза' : 'Играть'}>
+            {isCur && player.playing ? <Pause size={18} /> : <Play size={18} style={{ marginLeft: 2 }} />}
           </button>
         </div>
         <div className="grid-2">
@@ -443,10 +491,7 @@ function TrackModal({ id, onClose }: { id: ID; onClose: () => void }) {
           </div>
         </div>
         <Field label="Теги">
-          <div className="row wrap">
-            <TagChips ids={(form.tags ?? []) as ID[]} />
-            <TagPicker scope="music" value={(form.tags ?? []) as ID[]} onChange={(tags) => setForm({ ...form, tags })} trigger={<button className="btn sm">Изменить теги</button>} />
-          </div>
+          <TagGroupsEditor scope="music" value={(form.tags ?? []) as ID[]} onChange={(tags) => setForm({ ...form, tags })} />
         </Field>
         <div className="grid-2">
           <Field label="Источник">
@@ -573,11 +618,8 @@ function UploadTracksModal({ files, onClose }: { files: File[]; onClose: () => v
               </div>
             ))}
           </div>
-          <Field label="Теги для всех">
-            <div className="row wrap">
-              <TagChips ids={tags} />
-              <TagPicker scope="music" value={tags} onChange={setTags} trigger={<button className="btn sm">+ Теги</button>} />
-            </div>
+          <Field label="Теги для всех треков" hint="Жанр из тегов файла добавится сам, если такой тег есть в библиотеке">
+            <TagGroupsEditor scope="music" value={tags} onChange={setTags} />
           </Field>
           <div className="grid-2">
             <Field label="Источник">

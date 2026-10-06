@@ -82,6 +82,16 @@ export async function api<T = unknown>(path: string, opts: ApiOpts = {}): Promis
   return data as T
 }
 
+/** Sends a file as the raw request body (small uploads such as a profile picture). */
+export async function putBlob<T = unknown>(path: string, body: Blob): Promise<T> {
+  const res = await fetch('/api' + path, { method: 'PUT', headers: { 'X-CRM': '1', 'Content-Type': body.type || 'application/octet-stream' }, body, credentials: 'same-origin' }).catch(() => {
+    throw new ApiError(0, 'network', 'Нет связи с сервером')
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new ApiError(res.status, String(data.error ?? 'error'), String(data.message ?? `Ошибка ${res.status}`), data)
+  return data as T
+}
+
 export const get = <T>(path: string, signal?: AbortSignal) => api<T>(path, { signal })
 export const post = <T>(path: string, body?: unknown) => api<T>(path, { method: 'POST', body })
 export const patch = <T>(path: string, body: unknown) => api<T>(path, { method: 'PATCH', body })

@@ -85,6 +85,11 @@ type Probe struct {
 	Peaks      []int          `json:"peaks,omitempty"`
 }
 
+// WaveformBins is the resolution of audio waveforms: loudness (RMS) of this
+// many equal slices of the track, 0..100. Enough to see intro, verses,
+// drops and breaks; lists get a downsampled copy.
+const WaveformBins = 1000
+
 // StreamHeader is the first (text) frame on a stream/derived websocket.
 type StreamHeader struct {
 	Size  int64  `json:"size"`            // full size of the blob

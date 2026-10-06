@@ -1,11 +1,11 @@
 import clsx from 'clsx'
 import { ArrowLeft, Copy, Download, Ellipsis, Music, Pause, Play, Plus, Search, Send, Trash, Upload, X } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { LangBadges, StagePicker, TagChips, TagPicker, UserPicker } from '../components/pickers'
 import { Avatar, Button, Empty, IconButton, Loading, Menu, MenuItem, MenuSep, Popover, Toggle, useConfirm } from '../components/ui'
-import { fmtAgo, fmtBytes, fmtDateTime, fmtDuration } from '../lib/format'
+import { fmtAgo, fmtBytes, fmtDateTime, fmtDay, fmtDuration } from '../lib/format'
 import { ACTIONS, VARIANT_STATUS, VOICE } from '../lib/labels'
 import { playTrack, usePlayer } from '../lib/player'
 import { useAction, useActivity, useComments, useDicts, useTracks, useVideo, useVideos } from '../lib/queries'
@@ -83,10 +83,10 @@ export default function VideoPage() {
       <VideoHeader v={v} />
       <div className="vlayout">
         <div style={{ minWidth: 0 }}>
-          <div className="hide-d" style={{ marginBottom: 14 }}>
+          <div className="props-top">
             <Props v={v} />
           </div>
-          <div className="lang-tabs" style={{ marginBottom: 12 }}>
+          <div className="lang-tabs">
             {v.variants.map((x) => {
               const lang = d.langByCode.get(x.lang)
               const published = x.pubs.some((p) => p.status === 'published')
@@ -122,22 +122,20 @@ export default function VideoPage() {
               {tab === 'files' && (
                 <>
                   {variant && (
-                    <div className="row wrap" style={{ marginBottom: 6 }}>
-                      <h3 style={{ fontSize: 14 }} className="grow">
-                        {d.langByCode.get(variant.lang)?.flag} {d.langByCode.get(variant.lang)?.name ?? variant.lang} — материалы версии
+                    <div className="mat-head">
+                      <h3>
+                        {d.langByCode.get(variant.lang)?.flag} {d.langByCode.get(variant.lang)?.name ?? variant.lang}
                       </h3>
                       <ArchiveStatus variant={variant} />
                     </div>
                   )}
                   {variant && <Materials video={v} variant={variant} onFiles={(f, k) => uploadTo(f, k, variant)} />}
-                  <div className="row" style={{ margin: '22px 0 6px' }}>
-                    <h3 style={{ fontSize: 14 }} className="grow">
-                      Общие для всех языков
-                    </h3>
+                  <div className="mat-head shared">
+                    <h3>Общие для всех языков</h3>
                     <span className="small muted hide-m">исходники, проект монтажа, музыка, SFX</span>
                   </div>
                   <Materials video={v} variant={null} onFiles={(f, k) => uploadTo(f, k, null)} />
-                  <div className="row" style={{ marginTop: 16 }}>
+                  <div className="row" style={{ marginTop: 12 }}>
                     <label className="btn">
                       <Upload size={15} /> Загрузить несколько файлов
                       <input
@@ -181,7 +179,20 @@ function VideoHeader({ v }: { v: VideoDetail }) {
   const nav = useNavigate()
   const confirm = useConfirm()
   const [title, setTitle] = useState(v.title)
+  const titleRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => setTitle(v.title), [v.title])
+  // the title wraps instead of being cut off: grow the field with its text
+  useLayoutEffect(() => {
+    const el = titleRef.current
+    if (!el) return
+    const fit = () => {
+      el.style.height = 'auto'
+      el.style.height = el.scrollHeight + 'px'
+    }
+    fit()
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [title])
   const saveTitle = () => {
     if (title.trim() && title !== v.title) act('PATCH', `/videos/${v.id}`, { title }, { invalidate: [['video', v.id], ['videos']] })
     else setTitle(v.title)
@@ -197,13 +208,18 @@ function VideoHeader({ v }: { v: VideoDetail }) {
           {!v.is_unique && <span className="chip sm">перезалив, не считается новым</span>}
           <LangBadges video={v} />
         </div>
-        <input
+        <textarea
+          ref={titleRef}
           className="title-input"
+          rows={1}
           value={title}
-          onChange={(e) => setTitle(e.target.value)}
+          onChange={(e) => setTitle(e.target.value.replace(/\n/g, ' '))}
           onBlur={saveTitle}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              e.currentTarget.blur()
+            }
             if (e.key === 'Escape') setTitle(v.title)
           }}
           aria-label="Название ролика"
@@ -282,8 +298,8 @@ function AddLanguage({ video, onAdded }: { video: VideoDetail; onAdded: (id: ID)
 
 function Side({ v }: { v: VideoDetail }) {
   return (
-    <div className="form" style={{ gap: 16 }}>
-      <div className="hide-m">
+    <div className="form side" style={{ gap: 12 }}>
+      <div className="props-side">
         <Props v={v} />
       </div>
       <Checklist v={v} />
@@ -743,7 +759,7 @@ export function ActivityText({ a }: { a: Activity }) {
     case 'video.plan':
       return (
         <span>
-          {base}: {data.to ?? 'без даты'}
+          {base}: {data.to ? fmtDay(String(data.to), { long: true }) : 'без даты'}
         </span>
       )
     case 'publication.published':
@@ -794,7 +810,7 @@ export function ActivityText({ a }: { a: Activity }) {
     case 'day.excused':
       return (
         <span>
-          {base} на {data.date}
+          {base} на {data.date ? fmtDay(String(data.date), { long: true }) : ''}
         </span>
       )
     default:

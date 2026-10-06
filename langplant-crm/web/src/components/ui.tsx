@@ -3,7 +3,7 @@ import * as Dropdown from '@radix-ui/react-dropdown-menu'
 import * as Pop from '@radix-ui/react-popover'
 import clsx from 'clsx'
 import { Clapperboard, X } from 'lucide-react'
-import { createContext, forwardRef, useCallback, useContext, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { createContext, forwardRef, useCallback, useContext, useId, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { derivedUrl } from '../lib/api'
 import { initials } from '../lib/format'
 import type { Platform, Stage, User } from '../lib/types'
@@ -66,11 +66,15 @@ export function Empty({ icon, title, children, action }: { icon?: ReactNode; tit
   )
 }
 
-export function Avatar({ user, size }: { user?: User | null; size?: 'sm' | 'lg' }) {
+export const avatarUrl = (u: Pick<User, 'id' | 'avatar_at'>) => `/api/users/${u.id}/avatar?v=${u.avatar_at}`
+
+export function Avatar({ user, size }: { user?: User | null; size?: 'sm' | 'lg' | 'xl' }) {
+  const [broken, setBroken] = useState<string | null>(null)
   if (!user) return <span className={clsx('avatar', size)} style={{ background: 'var(--surface-3)', color: 'var(--text-3)' }} />
+  const src = user.avatar_at ? avatarUrl(user) : null
   return (
     <span className={clsx('avatar', size)} style={{ background: user.color }} title={user.name}>
-      {initials(user.name)}
+      {src && broken !== src ? <img src={src} alt="" loading="lazy" onError={() => setBroken(src)} /> : initials(user.name)}
     </span>
   )
 }
@@ -159,26 +163,133 @@ export function Thumb({ sha, size, className }: { sha: string | null | undefined
   )
 }
 
-export function Waveform({ peaks, progress = 0, onSeek, bars = 80, height = 28 }: { peaks: number[] | null; progress?: number; onSeek?: (f: number) => void; bars?: number; height?: number }) {
-  const data = resample(peaks, bars)
-  const w = bars * 3
+/**
+ * Audio waveform. With onSeek it is a scrubber: click to jump, press and drag
+ * to move through the track (the bars and a time label follow the pointer,
+ * onScrub gets live positions), arrow keys step by 5 seconds.
+ */
+export function Waveform({
+  peaks,
+  progress = 0,
+  onSeek,
+  onScrub,
+  durationMs,
+  height = 28,
+  barWidth = 2,
+  className,
+  label = 'Позиция в треке',
+}: {
+  peaks: number[] | null
+  progress?: number
+  onSeek?: (f: number) => void
+  onScrub?: (f: number) => void
+  durationMs?: number | null
+  height?: number
+  barWidth?: number
+  className?: string
+  label?: string
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  const [hover, setHover] = useState<number | null>(null)
+  const [drag, setDrag] = useState<number | null>(null)
+  const clip = 'w' + useId().replace(/[^a-zA-Z0-9_-]/g, '')
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    setWidth(el.clientWidth)
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const step = barWidth + 1
+  const bars = Math.max(16, Math.floor((width || 240) / step))
+  const data = useMemo(() => resample(peaks, bars), [peaks, bars])
+  const w = bars * step
+  const shown = drag ?? progress
+  const frac = (e: React.PointerEvent) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+  }
+  const interactive = !!onSeek
+  const tip = drag ?? hover
+  const fmtTip = (f: number) => {
+    const s = Math.round((f * (durationMs ?? 0)) / 1000)
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  }
+  const bars$ = data.map((v, i) => {
+    const h = Math.max(2, (v / 100) * height)
+    return <rect key={i} x={i * step} y={(height - h) / 2} width={barWidth} height={h} rx={barWidth / 2} />
+  })
   return (
-    <svg
-      className="wave"
-      viewBox={`0 0 ${w} ${height}`}
-      preserveAspectRatio="none"
+    <div
+      ref={ref}
+      className={clsx('wave', interactive && 'seekable', drag != null && 'dragging', className)}
       style={{ height }}
-      onClick={(e) => {
-        if (!onSeek) return
-        const r = e.currentTarget.getBoundingClientRect()
-        onSeek((e.clientX - r.left) / r.width)
+      role={interactive ? 'slider' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? label : undefined}
+      aria-valuemin={interactive ? 0 : undefined}
+      aria-valuemax={interactive ? 100 : undefined}
+      aria-valuenow={interactive ? Math.round(shown * 100) : undefined}
+      onPointerDown={(e) => {
+        if (!interactive || e.button > 0) return
+        e.preventDefault()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        const f = frac(e)
+        setDrag(f)
+        onScrub?.(f)
+      }}
+      onPointerMove={(e) => {
+        if (!interactive) return
+        const f = frac(e)
+        if (drag != null) {
+          setDrag(f)
+          onScrub?.(f)
+        } else if (e.pointerType === 'mouse') setHover(f)
+      }}
+      onPointerUp={(e) => {
+        if (drag == null) return
+        onSeek?.(frac(e))
+        setDrag(null)
+      }}
+      onPointerCancel={() => setDrag(null)}
+      onPointerLeave={() => setHover(null)}
+      onKeyDown={(e) => {
+        if (!interactive || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
+        e.preventDefault()
+        const d = durationMs ? 5000 / durationMs : 0.05
+        onSeek?.(Math.max(0, Math.min(1, progress + (e.key === 'ArrowRight' ? d : -d))))
       }}
     >
-      {data.map((v, i) => {
-        const h = Math.max(2, (v / 100) * height)
-        return <rect key={i} x={i * 3} y={(height - h) / 2} width={2} height={h} rx={1} className={i / data.length < progress ? 'p' : undefined} />
-      })}
-    </svg>
+      <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" aria-hidden>
+        <defs>
+          <clipPath id={`${clip}p`}>
+            <rect width={shown * w} height={height} />
+          </clipPath>
+          {tip != null && (
+            <clipPath id={`${clip}h`}>
+              <rect width={tip * w} height={height} />
+            </clipPath>
+          )}
+        </defs>
+        <g className="base">{bars$}</g>
+        {tip != null && drag == null && (
+          <g className="hover" clipPath={`url(#${clip}h)`}>
+            {bars$}
+          </g>
+        )}
+        <g className="played" clipPath={`url(#${clip}p)`}>
+          {bars$}
+        </g>
+      </svg>
+      {interactive && <span className="wave-head" style={{ left: `${shown * 100}%` }} />}
+      {interactive && tip != null && !!durationMs && (
+        <span className="wave-tip" style={{ left: `${tip * 100}%` }}>
+          {fmtTip(tip)}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -186,6 +297,7 @@ function resample(peaks: number[] | null, n: number): number[] {
   if (!peaks || peaks.length === 0) return Array.from({ length: n }, (_, i) => 18 + 10 * Math.sin(i / 2.3) * Math.cos(i / 5.1))
   const out: number[] = []
   for (let i = 0; i < n; i++) {
+    // more bars than data: stretch; fewer: the loudest value of each group
     const from = Math.floor((i * peaks.length) / n)
     const to = Math.max(from + 1, Math.floor(((i + 1) * peaks.length) / n))
     let m = 0
@@ -196,6 +308,10 @@ function resample(peaks: number[] | null, n: number): number[] {
 }
 
 // ---- dialogs ---------------------------------------------------------------
+
+// Popovers and menus opened inside a dialog render into it: a dialog locks
+// scrolling outside itself, so a popover portaled to <body> could not scroll.
+const PortalCtx = createContext<HTMLElement | null>(null)
 
 export function Modal({
   open,
@@ -212,11 +328,22 @@ export function Modal({
   footer?: ReactNode
   wide?: boolean
 }) {
+  const [el, setEl] = useState<HTMLDivElement | null>(null)
   return (
     <Dialog.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
-        <Dialog.Content className={clsx('modal', wide && 'wide')} aria-describedby={undefined}>
+        <Dialog.Content
+          ref={setEl}
+          className={clsx('modal', wide && 'wide')}
+          aria-describedby={undefined}
+          // without an autoFocus field, focus the dialog itself: no focus ring on the close button, no keyboard popping up on phones
+          onOpenAutoFocus={(e) => {
+            e.preventDefault()
+            ;(e.currentTarget as HTMLElement).focus({ preventScroll: true })
+          }}
+        >
+          <PortalCtx.Provider value={el}>
           <div className="modal-head">
             <Dialog.Title asChild>
               <h2>{title}</h2>
@@ -229,6 +356,7 @@ export function Modal({
           </div>
           <div className="modal-body">{children}</div>
           {footer && <div className="modal-foot">{footer}</div>}
+          </PortalCtx.Provider>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -276,10 +404,11 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 // ---- menus & popovers --------------------------------------------------------
 
 export function Menu({ trigger, children, align = 'end' }: { trigger: ReactNode; children: ReactNode; align?: 'start' | 'end' | 'center' }) {
+  const container = useContext(PortalCtx) ?? undefined
   return (
     <Dropdown.Root modal={false}>
       <Dropdown.Trigger asChild>{trigger}</Dropdown.Trigger>
-      <Dropdown.Portal>
+      <Dropdown.Portal container={container}>
         <Dropdown.Content className="popover" align={align} sideOffset={6} collisionPadding={10}>
           {children}
         </Dropdown.Content>
@@ -315,10 +444,11 @@ export function Popover({
   pad?: boolean
   align?: 'start' | 'end' | 'center'
 }) {
+  const container = useContext(PortalCtx) ?? undefined
   return (
     <Pop.Root open={open} onOpenChange={onOpenChange}>
       <Pop.Trigger asChild>{trigger}</Pop.Trigger>
-      <Pop.Portal>
+      <Pop.Portal container={container}>
         <Pop.Content className={clsx('popover', pad && 'pad')} align={align} sideOffset={6} collisionPadding={10}>
           {children}
         </Pop.Content>

@@ -29,6 +29,7 @@ type User struct {
 	Color     string `json:"color"`
 	Disabled  bool   `json:"disabled"`
 	CreatedAt int64  `json:"created_at"`
+	AvatarAt  *int64 `json:"avatar_at"` // version of the profile picture; nil = initials
 }
 
 func (u *User) admin() bool { return u.Role == "admin" }
@@ -82,9 +83,9 @@ func (s *Server) sessionUser(w http.ResponseWriter, r *http.Request) (*User, err
 	th := hashToken(c.Value)
 	var u User
 	var exp, seen int64
-	err = s.db.QueryRow(`SELECT u.id, u.login, u.name, u.role, u.color, u.disabled, u.created_at, s.expires_at, s.last_seen
+	err = s.db.QueryRow(`SELECT u.id, u.login, u.name, u.role, u.color, u.disabled, u.created_at, u.avatar_at, s.expires_at, s.last_seen
 		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`, th).
-		Scan(&u.ID, &u.Login, &u.Name, &u.Role, &u.Color, &u.Disabled, &u.CreatedAt, &exp, &seen)
+		Scan(&u.ID, &u.Login, &u.Name, &u.Role, &u.Color, &u.Disabled, &u.CreatedAt, &u.AvatarAt, &exp, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -176,8 +177,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) error {
 
 func (s *Server) userByID(id int64) (*User, error) {
 	var u User
-	err := s.db.QueryRow(`SELECT id, login, name, role, color, disabled, created_at FROM users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Login, &u.Name, &u.Role, &u.Color, &u.Disabled, &u.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, login, name, role, color, disabled, created_at, avatar_at FROM users WHERE id = ?`, id).
+		Scan(&u.ID, &u.Login, &u.Name, &u.Role, &u.Color, &u.Disabled, &u.CreatedAt, &u.AvatarAt)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +186,7 @@ func (s *Server) userByID(id int64) (*User, error) {
 }
 
 func (s *Server) listUsers() ([]User, error) {
-	rows, err := s.db.Query(`SELECT id, login, name, role, color, disabled, created_at FROM users ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, login, name, role, color, disabled, created_at, avatar_at FROM users ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +194,7 @@ func (s *Server) listUsers() ([]User, error) {
 	out := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Login, &u.Name, &u.Role, &u.Color, &u.Disabled, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Login, &u.Name, &u.Role, &u.Color, &u.Disabled, &u.CreatedAt, &u.AvatarAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)

@@ -14,6 +14,7 @@ import {
   HardDrive,
   Pencil,
   Play,
+  Plus,
   Trash,
   TriangleAlert,
   Upload,
@@ -49,10 +50,13 @@ export function Materials({ video, variant, onFiles }: { video: VideoDetail; var
   }, [assets])
   const sharedKinds = new Set(video.assets.filter((a) => a.variant_id === null).map((a) => a.kind))
   const kinds = d.kinds.filter((k) => (k.scope === scope && !k.archived) || byKind.has(k.key))
+  // required and filled slots get a row each; empty optional ones fold into one line of "+ type" buttons
+  const shown = kinds.filter((k) => k.required || byKind.has(k.key))
+  const spare = kinds.filter((k) => !k.required && !byKind.has(k.key))
 
   return (
     <div className="slots">
-      {kinds.map((k) => (
+      {shown.map((k) => (
         <Slot
           key={k.key}
           kind={k}
@@ -62,7 +66,53 @@ export function Materials({ video, variant, onFiles }: { video: VideoDetail; var
           onFiles={(files) => onFiles(files, k.key)}
         />
       ))}
+      {spare.length > 0 && (
+        <div className="slot-add">
+          <span className="small muted">{shown.length ? 'Ещё можно добавить:' : 'Добавить:'}</span>
+          {spare.map((k) => (
+            <AddKind key={k.key} kind={k} onFiles={(files) => onFiles(files, k.key)} />
+          ))}
+        </div>
+      )}
     </div>
+  )
+}
+
+/** "+ Музыка": picks or takes dropped files straight into an empty optional slot. */
+function AddKind({ kind, onFiles }: { kind: AssetKind; onFiles: (f: File[]) => void }) {
+  const [over, setOver] = useState(false)
+  return (
+    <label
+      className={clsx('chip outline lg add-kind', over && 'drop')}
+      title={kind.hint || undefined}
+      onDragOver={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setOver(true)
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setOver(false)
+        const fs = [...e.dataTransfer.files]
+        if (fs.length) onFiles(fs)
+      }}
+    >
+      <Plus size={13} />
+      {kind.name}
+      <input
+        type="file"
+        hidden
+        multiple
+        accept={kind.accept || undefined}
+        onChange={(e) => {
+          const fs = [...(e.target.files ?? [])]
+          e.target.value = ''
+          if (fs.length) onFiles(fs)
+        }}
+      />
+    </label>
   )
 }
 
@@ -92,44 +142,48 @@ function Slot({ kind, files, coveredByShared, video, onFiles }: { kind: AssetKin
       onDragLeave={() => setOver(false)}
       onDrop={drop}
     >
-      <div className="kind">
-        <div>
-          <div className="name">
-            {kind.name}
-            {kind.required && <span className={clsx('req', ok && 'ok')}>{ok ? '✓' : 'обязательно'}</span>}
-          </div>
-          {kind.hint && <div className="hint">{kind.hint}</div>}
-          {coveredByShared && files.length === 0 && <div className="hint">есть в общих файлах</div>}
+      <div className="slot-head">
+        <div className="kind">
+          <span className="name">{kind.name}</span>
+          {kind.required && <span className={clsx('req', ok && 'ok')}>{ok ? '✓' : 'обязательно'}</span>}
+          {coveredByShared && files.length === 0 ? <span className="hint keep">есть в общих файлах</span> : kind.hint && <span className="hint">{kind.hint}</span>}
         </div>
-      </div>
-      <div className="files">
-        {visible.map((a) => (
-          <FileRow key={a.id} asset={a} video={video} old={single && a !== files[0]} />
-        ))}
-        {hidden > 0 && (
-          <button className="btn ghost sm" style={{ alignSelf: 'flex-start' }} onClick={() => setShowOld(true)}>
-            Предыдущие версии: {hidden}
-          </button>
+        {files.length > 0 && (
+          <Button size="sm" variant="ghost" icon={<Upload size={14} />} onClick={() => input.current?.click()}>
+            {single ? 'Новая версия' : 'Добавить'}
+          </Button>
         )}
-        {files.length === 0 && <div className="small muted" style={{ paddingTop: 6 }}>Перетащите файл сюда или нажмите «Загрузить»</div>}
       </div>
-      <div>
-        <Button size="sm" icon={<Upload size={14} />} onClick={() => input.current?.click()}>
-          <span className="hide-m">{files.length && single ? 'Новая версия' : 'Загрузить'}</span>
-        </Button>
-        <input
-          ref={input}
-          type="file"
-          hidden
-          multiple={!single}
-          accept={kind.accept || undefined}
-          onChange={(e) => {
-            const fs = [...(e.target.files ?? [])]
-            e.target.value = ''
-            if (fs.length) onFiles(fs)
-          }}
-        />
-      </div>
+      {files.length > 0 ? (
+        <div className="files">
+          {visible.map((a) => (
+            <FileRow key={a.id} asset={a} video={video} old={single && a !== files[0]} />
+          ))}
+          {hidden > 0 && (
+            <button className="btn ghost sm" style={{ alignSelf: 'flex-start' }} onClick={() => setShowOld(true)}>
+              Предыдущие версии: {hidden}
+            </button>
+          )}
+        </div>
+      ) : (
+        <button type="button" className="slot-empty" onClick={() => input.current?.click()}>
+          <Upload size={15} />
+          <span className="hide-m">Перетащите файл сюда или нажмите, чтобы выбрать</span>
+          <span className="hide-d">Загрузить файл</span>
+        </button>
+      )}
+      <input
+        ref={input}
+        type="file"
+        hidden
+        multiple={!single}
+        accept={kind.accept || undefined}
+        onChange={(e) => {
+          const fs = [...(e.target.files ?? [])]
+          e.target.value = ''
+          if (fs.length) onFiles(fs)
+        }}
+      />
     </div>
   )
 }

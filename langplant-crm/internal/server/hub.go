@@ -309,9 +309,11 @@ func (h *Hub) dispatch(m proto.Msg) {
 			b, _ := json.Marshal(p.Peaks)
 			peaks = string(b)
 		}
+		// a finer waveform replaces a coarser one (older versions stored 200 bins)
 		db.Exec(`UPDATE blobs SET duration_ms = COALESCE(NULLIF(?, 0), duration_ms), width = COALESCE(NULLIF(?, 0), width), height = COALESCE(NULLIF(?, 0), height),
-			meta = ?, peaks = COALESCE(peaks, ?), derive_state = 'done', derive_at = ? WHERE sha256 = ?`,
-			p.DurationMs, p.Width, p.Height, string(meta), peaks, nowMs(), m.Sha)
+			meta = ?, peaks = CASE WHEN peaks IS NULL OR json_array_length(peaks) < ? THEN COALESCE(?, peaks) ELSE peaks END,
+			derive_state = 'done', derive_at = ? WHERE sha256 = ?`,
+			p.DurationMs, p.Width, p.Height, string(meta), len(p.Peaks), peaks, nowMs(), m.Sha)
 		h.s.events.Publish("videos", "music", "storage")
 	case proto.TDeriveFailed:
 		db.Exec(`UPDATE blobs SET derive_state = 'failed', derive_at = ? WHERE sha256 = ?`, nowMs(), m.Sha)

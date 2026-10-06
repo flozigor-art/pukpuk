@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,7 +75,7 @@ func (n *Node) derive(ctx context.Context, m proto.Msg) error {
 		}
 	}
 	if strings.HasPrefix(m.Mime, "audio/") {
-		if peaks, err := n.peaks(jctx, src, 200); err == nil {
+		if peaks, err := n.peaks(jctx, src, proto.WaveformBins); err == nil {
 			probe.Peaks = peaks
 		} else {
 			slog.Warn("waveform", "sha", m.Sha[:12], "err", err)
@@ -221,10 +222,11 @@ func (n *Node) ffmpeg(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// peaks decodes audio to mono 16-bit PCM and returns bins normalised to 0..100.
+// peaks decodes audio to mono 16-bit PCM and returns the loudness of bins
+// normalised to 0..100.
 func (n *Node) peaks(ctx context.Context, src string, bins int) ([]int, error) {
 	cmd := exec.CommandContext(ctx, n.cfg.FFmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-i", src,
-		"-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "-")
+		"-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -250,6 +252,9 @@ func (n *Node) peaks(ctx context.Context, src string, bins int) ([]int, error) {
 	return binPeaks(samples, bins), nil
 }
 
+// binPeaks returns the RMS level of each bin. Peak values of mastered music
+// sit at the limiter ceiling almost everywhere, so a peak waveform is a flat
+// brick; RMS follows the arrangement and shows the structure of the track.
 func binPeaks(samples []int16, bins int) []int {
 	if bins > len(samples) {
 		bins = len(samples)
@@ -258,16 +263,11 @@ func binPeaks(samples []int16, bins int) []int {
 	peak := 0.0
 	for i := range raw {
 		from, to := i*len(samples)/bins, (i+1)*len(samples)/bins
-		m := 0.0
+		sum := 0.0
 		for _, s := range samples[from:to] {
-			a := float64(s)
-			if a < 0 {
-				a = -a
-			}
-			if a > m {
-				m = a
-			}
+			sum += float64(s) * float64(s)
 		}
+		m := math.Sqrt(sum / float64(max(1, to-from)))
 		raw[i] = m
 		peak = max(peak, m)
 	}

@@ -1,12 +1,14 @@
 import clsx from 'clsx'
-import { ArrowDown, ArrowUp, Archive, KeyRound, Plus, Trash, UserPlus } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { ArrowDown, ArrowUp, Archive, Camera, Ellipsis, KeyRound, Plus, Trash, UserPlus } from 'lucide-react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { PageHead } from '../components/Layout'
-import { Avatar, Button, Field, IconButton, Modal, PLATFORM_ICONS, PlatformIcon, Toggle, useConfirm } from '../components/ui'
+import { Avatar, Button, Field, IconButton, Menu, MenuItem, MenuSep, Modal, PLATFORM_ICONS, PlatformIcon, Spinner, Toggle, useConfirm } from '../components/ui'
+import { putBlob } from '../lib/api'
+import { squareJpeg } from '../lib/media'
 import { STAGE_KIND } from '../lib/labels'
-import { useAction, useDicts } from '../lib/queries'
+import { queryClient, useAction, useDicts } from '../lib/queries'
 import type { ID, TagScope, User } from '../lib/types'
 
 type TabKey = 'profile' | 'users' | 'platforms' | 'languages' | 'stages' | 'kinds' | 'checklist' | 'tags' | 'plan'
@@ -15,38 +17,48 @@ export default function SettingsPage() {
   const d = useDicts()
   const [sp, setSp] = useSearchParams()
   const tab = (sp.get('tab') as TabKey) || 'profile'
-  const tabs: [TabKey, string, boolean?][] = [
+  const navRef = useRef<HTMLElement>(null)
+  // phones: the section list scrolls sideways; keep the open section in view
+  useEffect(() => {
+    const nav = navRef.current
+    const on = nav?.querySelector<HTMLElement>('.on')
+    if (nav && on && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = on.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2
+  }, [tab])
+  const tabs: [TabKey, string][] = [
     ['profile', 'Профиль'],
-    ['users', 'Пользователи', true],
+    ['users', 'Пользователи'],
     ['platforms', 'Площадки и аккаунты'],
     ['languages', 'Языки'],
     ['stages', 'Этапы'],
     ['kinds', 'Типы файлов'],
     ['checklist', 'Чек-лист'],
     ['tags', 'Теги'],
-    ['plan', 'План публикаций', true],
+    ['plan', 'План публикаций'],
   ]
   return (
-    <div className="page narrow">
-      <PageHead title="Настройки" sub={`LangPlant CRM ${d.config.version}`} />
-      <div className="tabs" style={{ marginBottom: 18, flexWrap: 'wrap' }}>
-        {tabs
-          .filter(([, , admin]) => !admin || d.isAdmin || true)
-          .map(([k, l]) => (
+    <div className="page settings">
+      <PageHead title="Настройки" />
+      <div className="settings-layout">
+        <nav ref={navRef} className="settings-nav" aria-label="Разделы настроек">
+          {tabs.map(([k, l]) => (
             <button key={k} className={clsx(tab === k && 'on')} onClick={() => setSp({ tab: k }, { replace: true })}>
               {l}
             </button>
           ))}
+          <div className="ver">LangPlant CRM {d.config.version}</div>
+        </nav>
+        <div style={{ minWidth: 0 }}>
+          {tab === 'profile' && <Profile />}
+          {tab === 'users' && <Users />}
+          {tab === 'platforms' && <Platforms />}
+          {tab === 'languages' && <Languages />}
+          {tab === 'stages' && <Stages />}
+          {tab === 'kinds' && <Kinds />}
+          {tab === 'checklist' && <ChecklistTpl />}
+          {tab === 'tags' && <Tags />}
+          {tab === 'plan' && <Plan />}
+        </div>
       </div>
-      {tab === 'profile' && <Profile />}
-      {tab === 'users' && <Users />}
-      {tab === 'platforms' && <Platforms />}
-      {tab === 'languages' && <Languages />}
-      {tab === 'stages' && <Stages />}
-      {tab === 'kinds' && <Kinds />}
-      {tab === 'checklist' && <ChecklistTpl />}
-      {tab === 'tags' && <Tags />}
-      {tab === 'plan' && <Plan />}
     </div>
   )
 }
@@ -95,44 +107,101 @@ function Card({ title, hint, children, actions }: { title?: string; hint?: React
   )
 }
 
-function Move<T>({ list, index, onMove }: { list: T[]; index: number; onMove: (l: T[]) => void }) {
+/**
+ * Order / archive / delete controls of a dictionary row: icon buttons on a
+ * computer, one "⋯" menu on a phone so the row fits the screen.
+ */
+function RowActions<T>({
+  list,
+  index,
+  onMove,
+  archived,
+  onArchive,
+  onDelete,
+  what,
+  extra,
+}: {
+  list?: T[]
+  index?: number
+  onMove?: (l: T[]) => void
+  archived?: boolean
+  onArchive?: (v: boolean) => void
+  onDelete?: () => void
+  what: string
+  extra?: ReactNode
+}) {
+  const confirm = useConfirm()
+  const canMove = list && index !== undefined && onMove
   const swap = (a: number, b: number) => {
+    if (!list || !onMove) return
     const n = [...list]
     ;[n[a], n[b]] = [n[b], n[a]]
     onMove(n)
   }
+  const del = async () => {
+    if (onDelete && (await confirm({ title: `Удалить ${what}?`, text: 'Если запись уже используется, удалить не получится — её можно архивировать.', confirm: 'Удалить', danger: true }))) onDelete()
+  }
+  const first = index === 0
+  const last = !!list && index === list.length - 1
   return (
-    <span className="row" style={{ gap: 0 }}>
-      <IconButton label="Выше" size="sm" disabled={index === 0} onClick={() => swap(index, index - 1)}>
-        <ArrowUp size={14} />
-      </IconButton>
-      <IconButton label="Ниже" size="sm" disabled={index === list.length - 1} onClick={() => swap(index, index + 1)}>
-        <ArrowDown size={14} />
-      </IconButton>
-    </span>
-  )
-}
-
-function DeleteBtn({ onDelete, what }: { onDelete: () => void; what: string }) {
-  const confirm = useConfirm()
-  return (
-    <IconButton
-      label="Удалить"
-      size="sm"
-      onClick={async () => {
-        if (await confirm({ title: `Удалить ${what}?`, text: 'Если запись уже используется, удалить не получится — её можно архивировать.', confirm: 'Удалить', danger: true })) onDelete()
-      }}
-    >
-      <Trash size={14} />
-    </IconButton>
-  )
-}
-
-function ArchiveBtn({ archived, onChange }: { archived: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <IconButton label={archived ? 'Вернуть из архива' : 'В архив (скрыть из списков)'} size="sm" active={archived} onClick={() => onChange(!archived)}>
-      <Archive size={14} />
-    </IconButton>
+    <>
+      <span className="row-actions hide-m">
+        {extra}
+        {canMove && (
+          <>
+            <IconButton label="Выше" size="sm" disabled={first} onClick={() => swap(index, index - 1)}>
+              <ArrowUp size={14} />
+            </IconButton>
+            <IconButton label="Ниже" size="sm" disabled={last} onClick={() => swap(index, index + 1)}>
+              <ArrowDown size={14} />
+            </IconButton>
+          </>
+        )}
+        {onArchive && (
+          <IconButton label={archived ? 'Вернуть из архива' : 'В архив (скрыть из списков)'} size="sm" active={archived} onClick={() => onArchive(!archived)}>
+            <Archive size={14} />
+          </IconButton>
+        )}
+        {onDelete && (
+          <IconButton label="Удалить" size="sm" onClick={del}>
+            <Trash size={14} />
+          </IconButton>
+        )}
+      </span>
+      <span className="row-actions hide-d">
+        <Menu
+          trigger={
+            <IconButton label="Действия">
+              <Ellipsis size={17} />
+            </IconButton>
+          }
+        >
+          {canMove && (
+            <>
+              <MenuItem icon={<ArrowUp size={15} />} onSelect={() => !first && swap(index, index - 1)}>
+                Выше
+              </MenuItem>
+              <MenuItem icon={<ArrowDown size={15} />} onSelect={() => !last && swap(index, index + 1)}>
+                Ниже
+              </MenuItem>
+            </>
+          )}
+          {onArchive && (
+            <MenuItem icon={<Archive size={15} />} onSelect={() => onArchive(!archived)}>
+              {archived ? 'Вернуть из архива' : 'В архив'}
+            </MenuItem>
+          )}
+          {onDelete && (
+            <>
+              <MenuSep />
+              <MenuItem icon={<Trash size={15} />} danger onSelect={del}>
+                Удалить
+              </MenuItem>
+            </>
+          )}
+        </Menu>
+      </span>
+    </>
   )
 }
 
@@ -147,23 +216,20 @@ function Profile() {
   return (
     <>
       <Card title="Профиль">
-        <div className="form">
-          <div className="row">
-            <Avatar user={me} size="lg" />
-            <div className="grow">
-              <b>{me.name}</b>
-              <div className="small muted">
-                {me.login} · {me.role === 'admin' ? 'администратор' : 'участник'}
-              </div>
+        <div className="profile">
+          <AvatarEditor user={me} />
+          <div className="form grow" style={{ minWidth: 0 }}>
+            <div className="grid-2">
+              <Field label="Имя">
+                <Inline value={me.name} onSave={(name) => act('PATCH', `/users/${me.id}`, { name }, { invalidate: [['bootstrap']] })} />
+              </Field>
+              <Field label="Цвет" hint="Фон инициалов, если нет фото">
+                <input type="color" className="color-dot" style={{ width: 44, height: 30 }} value={me.color} onChange={(e) => act('PATCH', `/users/${me.id}`, { color: e.target.value }, { invalidate: [['bootstrap']] })} />
+              </Field>
             </div>
-          </div>
-          <div className="grid-2">
-            <Field label="Имя">
-              <Inline value={me.name} onSave={(name) => act('PATCH', `/users/${me.id}`, { name }, { invalidate: [['bootstrap']] })} />
-            </Field>
-            <Field label="Цвет">
-              <input type="color" className="color-dot" style={{ width: 44, height: 34 }} value={me.color} onChange={(e) => act('PATCH', `/users/${me.id}`, { color: e.target.value }, { invalidate: [['bootstrap']] })} />
-            </Field>
+            <div className="small muted">
+              Логин {me.login} · {me.role === 'admin' ? 'администратор' : 'участник'}
+            </div>
           </div>
         </div>
       </Card>
@@ -193,6 +259,56 @@ function Profile() {
         </form>
       </Card>
     </>
+  )
+}
+
+/** Profile picture with upload / remove; the image is cropped to a square in the browser. */
+function AvatarEditor({ user }: { user: User }) {
+  const act = useAction()
+  const input = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+  const upload = async (file: File) => {
+    setBusy(true)
+    try {
+      const img = await squareJpeg(file, 320)
+      if (!img) throw new Error('Не удалось прочитать картинку')
+      await putBlob(`/users/${user.id}/avatar`, img)
+      await queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
+      toast.success('Фото обновлено')
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="avatar-edit">
+      <button type="button" className="avatar-pick" onClick={() => input.current?.click()} aria-label="Загрузить фото" disabled={busy}>
+        <Avatar user={user} size="xl" />
+        <span className="cam">{busy ? <Spinner size={16} /> : <Camera size={16} />}</span>
+      </button>
+      <div className="col">
+        <Button size="sm" onClick={() => input.current?.click()} disabled={busy}>
+          {user.avatar_at ? 'Сменить фото' : 'Загрузить фото'}
+        </Button>
+        {user.avatar_at && (
+          <Button size="sm" variant="ghost" onClick={() => act('DELETE', `/users/${user.id}/avatar`, undefined, { invalidate: [['bootstrap']] })} disabled={busy}>
+            Убрать
+          </Button>
+        )}
+      </div>
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          e.target.value = ''
+          if (f) upload(f)
+        }}
+      />
+    </div>
   )
 }
 
@@ -320,51 +436,53 @@ function Platforms() {
         </form>
       </Card>
       {d.platforms.map((p, i) => (
-        <div key={p.id} className="card" style={{ marginBottom: 12, opacity: p.archived ? 0.6 : 1 }}>
-          <div className="card-body">
-            <div className="row wrap">
-              <PlatformIcon platform={p} />
-              <Inline value={p.name} onSave={(v) => dict.patch('platforms', p.id, { name: v })} style={{ maxWidth: 220, fontWeight: 600 }} />
-              <input type="color" className="color-dot" value={p.color} onChange={(e) => dict.patch('platforms', p.id, { color: e.target.value })} title="Цвет" />
-              <select className="select sm" style={{ width: 'auto' }} value={p.icon} onChange={(e) => dict.patch('platforms', p.id, { icon: e.target.value })} title="Иконка">
-                <option value="">Буква</option>
-                {PLATFORM_ICONS.map((x) => (
-                  <option key={x} value={x}>
-                    {x}
-                  </option>
-                ))}
-              </select>
-              <span className="row small text-2" style={{ gap: 6 }}>
-                <Toggle on={p.counts_for_quota} onChange={(v) => dict.patch('platforms', p.id, { counts_for_quota: v })} label="Считается в план" /> в план
-              </span>
-              <span className="grow" />
-              <Move list={d.platforms.map((x) => x.id)} index={i} onMove={(ids) => dict.reorder('platforms', ids)} />
-              <ArchiveBtn archived={p.archived} onChange={(v) => dict.patch('platforms', p.id, { archived: v })} />
-              <DeleteBtn what="площадку" onDelete={() => dict.remove('platforms', p.id)} />
-            </div>
-            <div style={{ marginTop: 10, paddingLeft: 30 }}>
-              {d.channels
-                .filter((c) => c.platform_id === p.id)
-                .map((c) => (
-                  <div key={c.id} className="dict-row" style={{ flexWrap: 'wrap', opacity: c.archived ? 0.55 : 1 }}>
-                    <Inline value={c.name} onSave={(v) => dict.patch('channels', c.id, { name: v })} style={{ maxWidth: 200 }} placeholder="@аккаунт" />
-                    <select className="select sm" style={{ width: 'auto' }} value={c.language_code ?? ''} onChange={(e) => dict.patch('channels', c.id, { language_code: e.target.value || null })}>
-                      <option value="">Любой язык</option>
-                      {d.languages.map((l) => (
-                        <option key={l.code} value={l.code}>
-                          {l.flag} {l.name}
-                        </option>
-                      ))}
-                    </select>
-                    <Inline value={c.url} onSave={(v) => dict.patch('channels', c.id, { url: v })} placeholder="ссылка на профиль" className="grow" style={{ minWidth: 150 }} />
-                    <ArchiveBtn archived={c.archived} onChange={(v) => dict.patch('channels', c.id, { archived: v })} />
-                    <DeleteBtn what="аккаунт" onDelete={() => dict.remove('channels', c.id)} />
-                  </div>
-                ))}
-              <Button size="sm" variant="ghost" icon={<Plus size={14} />} onClick={() => dict.create('channels', { platform_id: p.id, name: 'Новый аккаунт', language_code: d.primaryLang })}>
-                Аккаунт
-              </Button>
-            </div>
+        <div key={p.id} className="card plat" style={{ opacity: p.archived ? 0.6 : 1 }}>
+          <div className="plat-head">
+            <PlatformIcon platform={p} />
+            <Inline value={p.name} onSave={(v) => dict.patch('platforms', p.id, { name: v })} className="plat-name" />
+            <input type="color" className="color-dot" value={p.color} onChange={(e) => dict.patch('platforms', p.id, { color: e.target.value })} title="Цвет" />
+            <select className="select sm plat-icon" value={p.icon} onChange={(e) => dict.patch('platforms', p.id, { icon: e.target.value })} title="Иконка">
+              <option value="">Буква</option>
+              {PLATFORM_ICONS.map((x) => (
+                <option key={x} value={x}>
+                  {x}
+                </option>
+              ))}
+            </select>
+            <label className="row small text-2 plat-quota" style={{ gap: 6 }}>
+              <Toggle on={p.counts_for_quota} onChange={(v) => dict.patch('platforms', p.id, { counts_for_quota: v })} label="Считается в план" /> в план
+            </label>
+            <RowActions
+              what="площадку"
+              list={d.platforms.map((x) => x.id)}
+              index={i}
+              onMove={(ids) => dict.reorder('platforms', ids)}
+              archived={p.archived}
+              onArchive={(v) => dict.patch('platforms', p.id, { archived: v })}
+              onDelete={() => dict.remove('platforms', p.id)}
+            />
+          </div>
+          <div className="plat-channels">
+            {d.channels
+              .filter((c) => c.platform_id === p.id)
+              .map((c) => (
+                <div key={c.id} className="chan-row" style={{ opacity: c.archived ? 0.55 : 1 }}>
+                  <Inline value={c.name} onSave={(v) => dict.patch('channels', c.id, { name: v })} placeholder="@аккаунт" className="chan-name" />
+                  <select className="select sm chan-lang" value={c.language_code ?? ''} onChange={(e) => dict.patch('channels', c.id, { language_code: e.target.value || null })}>
+                    <option value="">Любой язык</option>
+                    {d.languages.map((l) => (
+                      <option key={l.code} value={l.code}>
+                        {l.flag} {l.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Inline value={c.url} onSave={(v) => dict.patch('channels', c.id, { url: v })} placeholder="ссылка на профиль" className="chan-url" />
+                  <RowActions what="аккаунт" archived={c.archived} onArchive={(v) => dict.patch('channels', c.id, { archived: v })} onDelete={() => dict.remove('channels', c.id)} />
+                </div>
+              ))}
+            <Button size="sm" variant="ghost" icon={<Plus size={14} />} onClick={() => dict.create('channels', { platform_id: p.id, name: 'Новый аккаунт', language_code: d.primaryLang })}>
+              Аккаунт
+            </Button>
           </div>
         </div>
       ))}
@@ -384,21 +502,28 @@ function Languages() {
     <Card title="Языки" hint="Каждый ролик может иметь языковые версии: своя озвучка, субтитры, финал и публикации. Основной язык создаётся у каждого нового ролика автоматически.">
       {d.languages.map((l, i) => (
         <div key={l.code} className="dict-row" style={{ opacity: l.archived ? 0.55 : 1 }}>
-          <Inline value={l.flag} onSave={(v) => dict.patch('languages', l.code, { flag: v })} style={{ width: 52, textAlign: 'center' }} />
-          <span className="mono" style={{ width: 44 }}>
+          <Inline value={l.flag} onSave={(v) => dict.patch('languages', l.code, { flag: v })} style={{ width: 46, textAlign: 'center', padding: 0 }} />
+          <span className="mono" style={{ width: 26 }}>
             {l.code}
           </span>
           <Inline value={l.name} onSave={(v) => dict.patch('languages', l.code, { name: v })} className="grow" />
           {l.is_primary ? (
             <span className="chip sm green">основной</span>
           ) : (
-            <Button size="sm" variant="ghost" onClick={() => dict.patch('languages', l.code, { is_primary: true })}>
-              Сделать основным
+            <Button size="sm" variant="ghost" onClick={() => dict.patch('languages', l.code, { is_primary: true })} title="Сделать основным языком">
+              <span className="hide-m">Сделать основным</span>
+              <span className="hide-d">Основной</span>
             </Button>
           )}
-          <Move list={d.languages.map((x) => x.code)} index={i} onMove={(ids) => dict.reorder('languages', ids)} />
-          <ArchiveBtn archived={l.archived} onChange={(v) => dict.patch('languages', l.code, { archived: v })} />
-          <DeleteBtn what="язык" onDelete={() => dict.remove('languages', l.code)} />
+          <RowActions
+            what="язык"
+            list={d.languages.map((x) => x.code)}
+            index={i}
+            onMove={(ids) => dict.reorder('languages', ids)}
+            archived={l.archived}
+            onArchive={(v) => dict.patch('languages', l.code, { archived: v })}
+            onDelete={() => dict.remove('languages', l.code)}
+          />
         </div>
       ))}
       <form
@@ -412,9 +537,9 @@ function Languages() {
           setFlag('')
         }}
       >
-        <input className="input sm" style={{ width: 60 }} placeholder="🇪🇸" value={flag} onChange={(e) => setFlag(e.target.value)} />
-        <input className="input sm" style={{ width: 80 }} placeholder="es" value={code} onChange={(e) => setCode(e.target.value)} />
-        <input className="input sm grow" placeholder="Español" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="input sm" style={{ width: 46, textAlign: 'center', padding: 0 }} placeholder="🇪🇸" value={flag} onChange={(e) => setFlag(e.target.value)} />
+        <input className="input sm" style={{ width: 64 }} placeholder="es" value={code} onChange={(e) => setCode(e.target.value)} />
+        <input className="input sm grow" style={{ minWidth: 120 }} placeholder="Español" value={name} onChange={(e) => setName(e.target.value)} />
         <Button size="sm" type="submit" icon={<Plus size={14} />} disabled={!code || !name}>
           Добавить
         </Button>
@@ -435,19 +560,25 @@ function Stages() {
       actions={<Button size="sm" icon={<Plus size={14} />} onClick={() => dict.create('stages', { name: 'Новый этап', color: '#71717a', kind: 'work' })}>Этап</Button>}
     >
       {d.stages.map((s, i) => (
-        <div key={s.id} className="dict-row" style={{ opacity: s.archived ? 0.55 : 1, flexWrap: 'wrap' }}>
+        <div key={s.id} className="dict-row" style={{ opacity: s.archived ? 0.55 : 1 }}>
           <input type="color" className="color-dot" value={s.color} onChange={(e) => dict.patch('stages', s.id, { color: e.target.value })} />
-          <Inline value={s.name} onSave={(v) => dict.patch('stages', s.id, { name: v })} className="grow" style={{ minWidth: 140 }} />
-          <select className="select sm" style={{ width: 'auto' }} value={s.kind} onChange={(e) => dict.patch('stages', s.id, { kind: e.target.value })}>
+          <Inline value={s.name} onSave={(v) => dict.patch('stages', s.id, { name: v })} className="grow" />
+          <select className="select sm" style={{ width: 'auto', maxWidth: 150 }} value={s.kind} onChange={(e) => dict.patch('stages', s.id, { kind: e.target.value })}>
             {Object.entries(STAGE_KIND).map(([k, l]) => (
               <option key={k} value={k}>
                 {l}
               </option>
             ))}
           </select>
-          <Move list={d.stages.map((x) => x.id)} index={i} onMove={(ids) => dict.reorder('stages', ids)} />
-          <ArchiveBtn archived={s.archived} onChange={(v) => dict.patch('stages', s.id, { archived: v })} />
-          <DeleteBtn what="этап" onDelete={() => dict.remove('stages', s.id)} />
+          <RowActions
+            what="этап"
+            list={d.stages.map((x) => x.id)}
+            index={i}
+            onMove={(ids) => dict.reorder('stages', ids)}
+            archived={s.archived}
+            onArchive={(v) => dict.patch('stages', s.id, { archived: v })}
+            onDelete={() => dict.remove('stages', s.id)}
+          />
         </div>
       ))}
     </Card>
@@ -465,21 +596,37 @@ function Kinds() {
       hint="Слоты материалов в карточке ролика. «Обязательный» — входит в минимальный архив (п.7.2: финал, чистый голос, дорожка без голоса). «Языковой» — свой файл для каждого языка, «общий» — один на все языки."
       actions={<Button size="sm" icon={<Plus size={14} />} onClick={() => dict.create('kinds', { name: 'Новый тип', scope: 'shared' })}>Тип</Button>}
     >
+      <div className="kind-row kind-head hide-m" aria-hidden>
+        <span>Название</span>
+        <span>Подсказка</span>
+        <span>Для</span>
+        <span />
+        <span>Форматы</span>
+        <span />
+      </div>
       {d.kinds.map((k, i) => (
-        <div key={k.key} className="dict-row" style={{ flexWrap: 'wrap', opacity: k.archived ? 0.55 : 1 }}>
-          <Inline value={k.name} onSave={(v) => dict.patch('kinds', k.key, { name: v })} style={{ width: 190, fontWeight: 600 }} />
-          <Inline value={k.hint} onSave={(v) => dict.patch('kinds', k.key, { hint: v })} placeholder="подсказка" className="grow" style={{ minWidth: 140 }} />
-          <select className="select sm" style={{ width: 'auto' }} value={k.scope} onChange={(e) => dict.patch('kinds', k.key, { scope: e.target.value })}>
+        <div key={k.key} className="kind-row" style={{ opacity: k.archived ? 0.55 : 1 }}>
+          <Inline value={k.name} onSave={(v) => dict.patch('kinds', k.key, { name: v })} className="kr-name" style={{ fontWeight: 600 }} />
+          <Inline value={k.hint} onSave={(v) => dict.patch('kinds', k.key, { hint: v })} placeholder="подсказка" className="kr-hint" />
+          <select className="select sm kr-scope" value={k.scope} onChange={(e) => dict.patch('kinds', k.key, { scope: e.target.value })}>
             <option value="variant">Языковой</option>
             <option value="shared">Общий</option>
           </select>
-          <span className="row small text-2" style={{ gap: 6 }}>
+          <label className="row small text-2 kr-req" style={{ gap: 6 }}>
             <Toggle on={k.required} onChange={(v) => dict.patch('kinds', k.key, { required: v })} label="Обязательный" /> обяз.
+          </label>
+          <Inline value={k.accept} onSave={(v) => dict.patch('kinds', k.key, { accept: v })} placeholder="любые файлы" className="kr-accept" />
+          <span className="kr-actions">
+            <RowActions
+              what="тип файла"
+              list={d.kinds.map((x) => x.key)}
+              index={i}
+              onMove={(ids) => dict.reorder('kinds', ids)}
+              archived={k.archived}
+              onArchive={(v) => dict.patch('kinds', k.key, { archived: v })}
+              onDelete={() => dict.remove('kinds', k.key)}
+            />
           </span>
-          <Inline value={k.accept} onSave={(v) => dict.patch('kinds', k.key, { accept: v })} placeholder="video/*, .srt" style={{ width: 120 }} />
-          <Move list={d.kinds.map((x) => x.key)} index={i} onMove={(ids) => dict.reorder('kinds', ids)} />
-          <ArchiveBtn archived={k.archived} onChange={(v) => dict.patch('kinds', k.key, { archived: v })} />
-          <DeleteBtn what="тип файла" onDelete={() => dict.remove('kinds', k.key)} />
         </div>
       ))}
     </Card>
@@ -497,8 +644,7 @@ function ChecklistTpl() {
       {d.checklist.map((c, i) => (
         <div key={c.id} className="dict-row">
           <Inline value={c.label} onSave={(v) => dict.patch('checklist', c.id, { label: v })} className="grow" />
-          <Move list={d.checklist.map((x) => x.id)} index={i} onMove={(ids) => dict.reorder('checklist', ids)} />
-          <DeleteBtn what="пункт" onDelete={() => dict.remove('checklist', c.id)} />
+          <RowActions what="пункт" list={d.checklist.map((x) => x.id)} index={i} onMove={(ids) => dict.reorder('checklist', ids)} onDelete={() => dict.remove('checklist', c.id)} />
         </div>
       ))}
       <form
@@ -542,7 +688,7 @@ function TagScopeCard({ scope, title, hint }: { scope: TagScope; title: string; 
           <div className="row" style={{ marginBottom: 8 }}>
             {group ? <Inline value={group.name} onSave={(v) => dict.patch('tag_groups', group.id, { name: v })} style={{ maxWidth: 220, fontWeight: 600 }} /> : <b className="small">Без группы</b>}
             <span className="grow" />
-            {group && <DeleteBtn what="группу (теги останутся без группы)" onDelete={() => dict.remove('tag_groups', group.id)} />}
+            {group && <RowActions what="группу (теги останутся без группы)" onDelete={() => dict.remove('tag_groups', group.id)} />}
           </div>
           <div className="chips">
             {tags.map((t) => (

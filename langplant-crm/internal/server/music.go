@@ -115,7 +115,29 @@ func (s *Server) handleListTracks(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
+	for _, t := range list {
+		t.Peaks = downsamplePeaks(t.Peaks, listWaveformBins)
+	}
 	return ok(w, list)
+}
+
+// listWaveformBins is the waveform resolution in track lists, enough for a
+// row; the full waveform comes with a single track (GET /api/music/{id}).
+const listWaveformBins = 160
+
+func downsamplePeaks(raw json.RawMessage, n int) json.RawMessage {
+	var p []int
+	if json.Unmarshal(raw, &p) != nil || len(p) <= n {
+		return raw
+	}
+	out := make([]int, n)
+	for i := range out {
+		for _, v := range p[i*len(p)/n : (i+1)*len(p)/n] {
+			out[i] = max(out[i], v)
+		}
+	}
+	b, _ := json.Marshal(out)
+	return b
 }
 
 func (s *Server) handleGetTrack(w http.ResponseWriter, r *http.Request) error {

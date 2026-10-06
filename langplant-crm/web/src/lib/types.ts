@@ -8,6 +8,8 @@ export interface User {
   color: string
   disabled: boolean
   created_at: number
+  /** Version of the profile picture; null = initials on the user's colour. */
+  avatar_at: number | null
 }
 
 export interface Language {

@@ -29,7 +29,16 @@ audio.addEventListener('pause', () => set({ playing: false }))
 audio.addEventListener('waiting', () => set({ loading: true }))
 audio.addEventListener('playing', () => set({ loading: false, error: null }))
 audio.addEventListener('canplay', () => set({ loading: false }))
-audio.addEventListener('loadedmetadata', () => set({ duration: audio.duration * 1000 }))
+// a seek requested before the track has loaded (e.g. a click on its waveform)
+let pendingSeek: number | null = null
+audio.addEventListener('loadedmetadata', () => {
+  set({ duration: audio.duration * 1000 })
+  if (pendingSeek != null) {
+    audio.currentTime = pendingSeek * audio.duration
+    set({ time: audio.currentTime * 1000 })
+    pendingSeek = null
+  }
+})
 let lastTick = 0
 audio.addEventListener('timeupdate', () => {
   const now = performance.now()
@@ -45,9 +54,10 @@ audio.addEventListener('error', () => {
 
 export const current = () => (state.index >= 0 ? state.queue[state.index] : undefined)
 
-function load(i: number) {
+function load(i: number, at: number | null = null) {
   const t = state.queue[i]
   if (!t) return
+  pendingSeek = at
   set({ index: i, time: 0, duration: t.duration_ms ?? 0, loading: true, error: null })
   audio.src = fileUrl(t.sha256)
   audio.play().catch(() => set({ playing: false, loading: false }))
@@ -61,16 +71,20 @@ function load(i: number) {
   }
 }
 
-export function playTrack(track: Track, queue?: Track[]) {
+/** Plays a track (or toggles it, if it is the current one). `at` starts it from that fraction. */
+export function playTrack(track: Track, queue?: Track[], at?: number) {
   const q = queue ?? [track]
   const i = q.findIndex((t) => t.id === track.id)
   const cur = current()
   if (cur && cur.id === track.id) {
-    toggle()
+    if (at != null) {
+      seek(at)
+      if (audio.paused) audio.play().catch(() => {})
+    } else toggle()
     return
   }
   state = { ...state, queue: q }
-  load(i < 0 ? 0 : i)
+  load(i < 0 ? 0 : i, at ?? null)
 }
 
 export function toggle() {
@@ -94,9 +108,22 @@ export function prev() {
 }
 
 export function seek(fraction: number) {
-  if (!isFinite(audio.duration)) return
-  audio.currentTime = Math.max(0, Math.min(1, fraction)) * audio.duration
+  const f = Math.max(0, Math.min(1, fraction))
+  if (!isFinite(audio.duration)) {
+    pendingSeek = f
+    return
+  }
+  audio.currentTime = f * audio.duration
   set({ time: audio.currentTime * 1000 })
+}
+
+let lastScrub = 0
+/** Live seeking while the waveform is being dragged: throttled, so the audio follows without stuttering. */
+export function scrub(fraction: number) {
+  const now = performance.now()
+  if (now - lastScrub < 120) return
+  lastScrub = now
+  seek(fraction)
 }
 
 export function stop() {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { StagePicker, TagChips, TagPicker } from '../components/pickers'
+import { StagePicker, TagGroupsEditor } from '../components/pickers'
 import { Button, Field, Modal, StagePill } from '../components/ui'
 import { useAction, useDicts } from '../lib/queries'
 import type { ID, Video } from '../lib/types'
@@ -64,10 +64,7 @@ export function NewVideoModal({ open, onClose, planDate }: { open: boolean; onCl
           </Field>
         </div>
         <Field label="Теги">
-          <div className="row wrap">
-            <TagChips ids={tags} />
-            <TagPicker scope="video" value={tags} onChange={setTags} trigger={<button type="button" className="btn sm">+ Тег</button>} />
-          </div>
+          <TagGroupsEditor scope="video" value={tags} onChange={setTags} />
         </Field>
         <button type="submit" hidden />
       </form>

@@ -191,6 +191,9 @@ func (s *Server) Handler() http.Handler {
 	admin("POST /api/users", s.handleCreateUser)
 	api("PATCH /api/users/{id}", s.handlePatchUser)
 	api("POST /api/users/{id}/password", s.handleUserPassword)
+	api("GET /api/users/{id}/avatar", s.handleGetAvatar)
+	api("PUT /api/users/{id}/avatar", s.handlePutAvatar)
+	api("DELETE /api/users/{id}/avatar", s.handleDeleteAvatar)
 
 	api("GET /api/storage", s.handleStorage)
 	admin("POST /api/storage/resync", s.handleResync)

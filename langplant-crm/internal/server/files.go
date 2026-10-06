@@ -268,7 +268,7 @@ func (s *Server) handleClientPeaks(w http.ResponseWriter, r *http.Request) error
 		req.Peaks[i] = min(max(p, 0), 100)
 	}
 	pj, _ := json.Marshal(req.Peaks)
-	s.db.Exec(`UPDATE blobs SET peaks = ? WHERE sha256 = ? AND peaks IS NULL`, string(pj), sha)
+	s.db.Exec(`UPDATE blobs SET peaks = ? WHERE sha256 = ? AND (peaks IS NULL OR json_array_length(peaks) < ?)`, string(pj), sha, len(req.Peaks))
 	if req.DurationMs != nil && *req.DurationMs > 0 {
 		s.db.Exec(`UPDATE blobs SET duration_ms = ? WHERE sha256 = ? AND duration_ms IS NULL`, *req.DurationMs, sha)
 	}

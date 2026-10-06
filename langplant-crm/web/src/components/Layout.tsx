@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import {
   CalendarDays,
   ChevronDown,
+  ChevronLeft,
   Clapperboard,
   HardDrive,
   History,
@@ -27,7 +28,7 @@ import { NewVideoModal } from '../pages/NewVideo'
 import { PlayerBar } from './PlayerBar'
 import { UndoDock, UndoHistory, UndoTopButton } from './UndoCenter'
 import { UploadPanel } from './UploadPanel'
-import { Avatar, Menu, MenuItem, MenuLabel, MenuSep, Modal } from './ui'
+import { Avatar, IconButton, Menu, MenuItem, MenuLabel, MenuSep, Modal } from './ui'
 
 type Theme = 'system' | 'light' | 'dark'
 export function applyTheme(t: Theme) {
@@ -73,9 +74,11 @@ export function Layout() {
   const [theme, setTheme] = useState<Theme>(savedTheme())
   const online = dash.data?.storage.online
   const title = TITLES.find(([re]) => re.test(loc.pathname))?.[1] ?? 'LangPlant'
+  // detail pages get a back button in the phone top bar instead of the logo
+  const detail = /^\/videos\/\d+/.test(loc.pathname) ? '/videos' : null
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--player', player.track ? (window.innerWidth < 900 ? '68px' : '68px') : '0px')
+    document.documentElement.style.setProperty('--player', player.track ? '68px' : '0px')
   }, [player.track])
   useEffect(() => setMore(false), [loc.pathname])
   useUndoShortcuts()
@@ -170,9 +173,15 @@ export function Layout() {
         </aside>
 
         <header className="topbar">
-          <span className="brand-logo" style={{ width: 26, height: 26 }}>
-            <Sprout size={15} />
-          </span>
+          {detail ? (
+            <IconButton label="Назад" className="back" onClick={() => (window.history.state?.idx > 0 ? nav(-1) : nav(detail))}>
+              <ChevronLeft size={22} />
+            </IconButton>
+          ) : (
+            <span className="brand-logo" style={{ width: 26, height: 26 }}>
+              <Sprout size={15} />
+            </span>
+          )}
           <div className="title">{title}</div>
           <UndoTopButton onHistory={() => setHistory(true)} />
           {online !== undefined && (
