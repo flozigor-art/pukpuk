@@ -659,6 +659,15 @@ p {
   border: 1px solid transparent;
   line-height: 1;
 }
+.chip.wrap {
+  height: auto;
+  min-height: 24px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  white-space: normal;
+  line-height: 1.3;
+  max-width: 100%;
+}
 button.chip {
   cursor: pointer;
 }
@@ -2391,4 +2400,175 @@ input[type='color'].color-dot::-webkit-color-swatch {
 }
 .select-native-wrap {
   position: relative;
+}
+
+/* ---------- undo ---------- */
+
+.undo-dock {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  margin: 0 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.undo-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  transition: background 0.12s;
+}
+.undo-main:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.undo-main:disabled {
+  cursor: default;
+  color: var(--text-3);
+}
+.undo-main > svg {
+  flex: none;
+}
+.undo-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 550;
+  font-size: 13px;
+}
+.undo-title .kbd {
+  margin-left: auto;
+  font-size: 10px;
+}
+.undo-sub {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 1px;
+}
+.undo-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.undo-hero-label {
+  font-weight: 550;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.undo-day {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  padding: 12px 0 7px;
+  background: var(--surface);
+  box-shadow: 0 1px 0 var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.undo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.undo-day + .undo-row {
+  border-top: 0;
+  margin-top: 1px;
+}
+.undo-label {
+  font-size: 13.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.undo-kind {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 4px;
+  color: var(--text-3);
+}
+.undo-row.undone .undo-label {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-color: var(--border-strong);
+}
+.undo-meta {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+.undo-meta a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--border-strong);
+}
+.undo-meta a:hover {
+  color: var(--text);
+}
+.undo-btn {
+  flex: none;
+}
+.undo-blocked {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--amber-text);
+}
+.undo-blocked button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.undo-row.flash {
+  animation: undo-flash 1.6s ease-out;
+}
+@keyframes undo-flash {
+  0%,
+  40% {
+    background: var(--amber-soft);
+  }
+}
+.undo-lock {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  color: var(--text-3);
+}
+@media (max-width: 599px) {
+  .undo-hero {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .undo-hero .btn {
+    height: 42px;
+  }
+  .undo-row {
+    padding: 10px 0;
+  }
+  .undo-btn {
+    height: 34px;
+  }
 }

@@ -23,6 +23,35 @@ const SettingsPage = lazy(() => import('./pages/Settings'))
 
 applyTheme(savedTheme())
 
+/** Toasts at the top on a computer; on a phone at the bottom, above the tab bar, within thumb reach. */
+function Toasts() {
+  const [phone, setPhone] = useState(() => window.matchMedia('(max-width: 899px)').matches)
+  const themeAttr = (): 'light' | 'dark' | 'system' => (document.documentElement.getAttribute('data-theme') as 'light' | 'dark' | null) ?? 'system'
+  const [theme, setTheme] = useState(themeAttr)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 899px)')
+    const on = () => setPhone(mq.matches)
+    mq.addEventListener('change', on)
+    // follow the theme switch of the app (data-theme on <html>)
+    const obs = new MutationObserver(() => setTheme(themeAttr()))
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => {
+      mq.removeEventListener('change', on)
+      obs.disconnect()
+    }
+  }, [])
+  return (
+    <Toaster
+      position={phone ? 'bottom-center' : 'top-center'}
+      theme={theme}
+      mobileOffset={{ bottom: 'calc(var(--bottombar) + var(--player) + var(--safe-bottom) + 10px)', left: 12, right: 12 }}
+      richColors
+      closeButton={!phone}
+      toastOptions={{ style: { fontFamily: 'var(--font)' } }}
+    />
+  )
+}
+
 function Authed() {
   const boot = useBootstrapQuery()
   useServerEvents(boot.isSuccess)
@@ -101,7 +130,7 @@ createRoot(document.getElementById('root')!).render(
       <BrowserRouter>
         <ConfirmProvider>
           <App />
-          <Toaster position="top-center" richColors closeButton toastOptions={{ style: { fontFamily: 'var(--font)' } }} />
+          <Toasts />
         </ConfirmProvider>
       </BrowserRouter>
     </QueryClientProvider>

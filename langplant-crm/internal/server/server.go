@@ -32,6 +32,9 @@ type Server struct {
 	events *EventBus
 	limit  *loginLimiter
 
+	undoMu   sync.Mutex          // one undo step is recorded at a time
+	undoCols map[string][]string // columns of the tracked tables
+
 	locMu sync.RWMutex
 	loc   *time.Location
 
@@ -54,6 +57,10 @@ func New(cfg config.Server) (*Server, error) {
 	if err := s.seed(); err != nil {
 		d.Close()
 		return nil, fmt.Errorf("seed: %w", err)
+	}
+	if err := s.installUndo(); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("undo: %w", err)
 	}
 	s.reloadLocation()
 	s.store, err = newBlobStore(s, filepath.Join(cfg.DataDir))
@@ -152,6 +159,9 @@ func (s *Server) Handler() http.Handler {
 	api("PATCH /api/comments/{id}", s.handlePatchComment)
 	api("DELETE /api/comments/{id}", s.handleDeleteComment)
 	api("GET /api/activity", s.handleActivity)
+	api("GET /api/undo", s.handleUndoList)
+	api("POST /api/undo/last", s.handleUndoLast)
+	api("POST /api/undo/{id}", s.handleUndo)
 
 	api("GET /api/music", s.handleListTracks)
 	api("GET /api/music/{id}", s.handleGetTrack)
@@ -272,6 +282,7 @@ func (s *Server) janitor() {
 		s.store.cleanupStaleUploads(48 * time.Hour)
 		s.store.enforceLimits(0)
 		s.hub.resendPending()
+		s.pruneUndo()
 		select {
 		case <-s.ctx.Done():
 			return

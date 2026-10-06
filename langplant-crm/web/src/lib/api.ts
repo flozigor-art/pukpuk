@@ -15,7 +15,29 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
 }
 
-export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+/** A change recorded in the undo history, announced by the X-Undo-* headers. */
+export interface UndoStepRef {
+  id: number
+  label: string
+  merged: boolean
+}
+
+let onUndoStep: ((step: UndoStepRef, label?: string) => void) | null = null
+export function setUndoStepHandler(fn: (step: UndoStepRef, label?: string) => void) {
+  onUndoStep = fn
+}
+
+export interface ApiOpts {
+  method?: string
+  body?: unknown
+  signal?: AbortSignal
+  /** Text for the "undo" toast instead of the server's label. */
+  undoLabel?: string
+  /** Called when the request created (or extended) an undo step. */
+  onUndoStep?: (step: UndoStepRef) => void
+}
+
+export async function api<T = unknown>(path: string, opts: ApiOpts = {}): Promise<T> {
   const method = opts.method ?? 'GET'
   const headers: Record<string, string> = {}
   if (method !== 'GET') headers['X-CRM'] = '1'
@@ -44,6 +66,18 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
     const d = (data ?? {}) as Record<string, unknown>
     if (res.status === 401 && path !== '/auth/login') onUnauthorized?.()
     throw new ApiError(res.status, String(d.error ?? 'error'), String(d.message ?? `Ошибка ${res.status}`), d)
+  }
+  const stepId = Number(res.headers.get('X-Undo-Step'))
+  if (stepId > 0) {
+    let label = res.headers.get('X-Undo-Label') ?? ''
+    try {
+      label = decodeURIComponent(label)
+    } catch {
+      /* keep as is */
+    }
+    const step = { id: stepId, label, merged: res.headers.get('X-Undo-Merged') === '1' }
+    opts.onUndoStep?.(step)
+    onUndoStep?.(step, opts.undoLabel)
   }
   return data as T
 }

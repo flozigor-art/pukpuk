@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Clapperboard,
   HardDrive,
+  History,
   LayoutDashboard,
   LogOut,
   Menu as MenuIcon,
@@ -20,9 +21,11 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { post } from '../lib/api'
 import { usePlayer } from '../lib/player'
+import { useUndoShortcuts } from '../lib/undo'
 import { queryClient, useDashboard, useDicts } from '../lib/queries'
 import { NewVideoModal } from '../pages/NewVideo'
 import { PlayerBar } from './PlayerBar'
+import { UndoDock, UndoHistory, UndoTopButton } from './UndoCenter'
 import { UploadPanel } from './UploadPanel'
 import { Avatar, Menu, MenuItem, MenuLabel, MenuSep, Modal } from './ui'
 
@@ -66,6 +69,7 @@ export function Layout() {
   const dash = useDashboard()
   const [newVideo, setNewVideo] = useState<{ open: boolean; date?: string }>({ open: false })
   const [more, setMore] = useState(false)
+  const [history, setHistory] = useState(false)
   const [theme, setTheme] = useState<Theme>(savedTheme())
   const online = dash.data?.storage.online
   const title = TITLES.find(([re]) => re.test(loc.pathname))?.[1] ?? 'LangPlant'
@@ -74,6 +78,7 @@ export function Layout() {
     document.documentElement.style.setProperty('--player', player.track ? (window.innerWidth < 900 ? '68px' : '68px') : '0px')
   }, [player.track])
   useEffect(() => setMore(false), [loc.pathname])
+  useUndoShortcuts()
 
   const logout = async () => {
     await post('/auth/logout').catch(() => {})
@@ -130,6 +135,7 @@ export function Layout() {
             ))}
           </nav>
           <div className="sidebar-foot">
+            <UndoDock onHistory={() => setHistory(true)} />
             <Menu
               align="start"
               trigger={
@@ -168,6 +174,7 @@ export function Layout() {
             <Sprout size={15} />
           </span>
           <div className="title">{title}</div>
+          <UndoTopButton onHistory={() => setHistory(true)} />
           {online !== undefined && (
             <NavLink to="/storage" className="icon-btn" aria-label="Хранилище">
               <span className={clsx('dot', online ? 'on' : 'off')} />
@@ -204,6 +211,16 @@ export function Layout() {
                 {l.to === '/storage' && online !== undefined && <span className={clsx('dot', online ? 'on' : 'off')} style={{ marginLeft: 'auto' }} />}
               </NavLink>
             ))}
+            <button
+              className="nav-link"
+              style={{ padding: '12px 10px', fontSize: 15, border: 0, background: 'none', width: '100%' }}
+              onClick={() => {
+                setMore(false)
+                setHistory(true)
+              }}
+            >
+              <History size={18} /> История изменений
+            </button>
             <div className="nav-sep" />
             <div className="row" style={{ padding: '6px 10px', justifyContent: 'space-between' }}>
               <span className="text-2">Тема</span>
@@ -232,6 +249,7 @@ export function Layout() {
             <Plus size={24} />
           </button>
         )}
+        <UndoHistory open={history} onClose={() => setHistory(false)} />
         <UploadPanel />
         <PlayerBar />
         <NewVideoModal open={newVideo.open} planDate={newVideo.date} onClose={() => setNewVideo({ open: false })} />

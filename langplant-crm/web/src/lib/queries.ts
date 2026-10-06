@@ -20,6 +20,7 @@ import type {
   TagScope,
   Track,
   TrashData,
+  UndoItem,
   User,
   Video,
   VideoDetail,
@@ -112,6 +113,8 @@ export const useTrack = (id: number) =>
   })
 export const useStorage = () => useQuery({ queryKey: ['storage'], queryFn: () => get<StorageStatus>('/storage'), refetchInterval: 30_000 })
 export const useTrash = () => useQuery({ queryKey: ['trash'], queryFn: () => get<TrashData>('/trash') })
+export const useUndoHistory = (enabled = true) =>
+  useQuery({ queryKey: ['undo'], queryFn: () => get<UndoItem[]>('/undo?limit=100'), enabled, staleTime: 10_000 })
 
 /** Calls the API, shows errors as toasts and refreshes the given queries. */
 export function useAction() {
@@ -119,9 +122,11 @@ export function useAction() {
   return useCallback(
     async <T = unknown>(method: string, path: string, body?: unknown, opts: { invalidate?: unknown[][]; success?: string; silent?: boolean } = {}): Promise<T | undefined> => {
       try {
-        const res = await api<T>(path, { method, body })
+        let undoable = false
+        // the success text becomes the label of the undo toast, so there is one toast, not two
+        const res = await api<T>(path, { method, body, undoLabel: opts.success, onUndoStep: () => (undoable = true) })
         for (const key of opts.invalidate ?? []) qc.invalidateQueries({ queryKey: key })
-        if (opts.success) toast.success(opts.success)
+        if (opts.success && !undoable) toast.success(opts.success)
         return res
       } catch (e) {
         if (!opts.silent) toast.error((e as Error).message)
@@ -141,6 +146,7 @@ const topicKeys: Record<string, unknown[][]> = {
   users: [['bootstrap']],
   trash: [['trash']],
   activity: [['activity'], ['dashboard']],
+  undo: [['undo']],
 }
 
 /** Subscribes to server-sent change notifications and refreshes affected data. */

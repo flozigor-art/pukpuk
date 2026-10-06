@@ -29,10 +29,7 @@ export function Login({ onLogin }: { onLogin: () => void }) {
         <span className="brand-logo" style={{ width: 40, height: 40, borderRadius: 12 }}>
           <Sprout size={22} />
         </span>
-        <h1>LangPlant CRM</h1>
-        <p className="muted" style={{ marginBottom: 20 }}>
-          Ролики, архив материалов, план публикаций и музыка
-        </p>
+        <h1 style={{ marginBottom: 20 }}>LangPlant CRM</h1>
         <div className="form">
           <Field label="Логин">
             <input className="input" value={login} onChange={(e) => setLogin(e.target.value)} autoComplete="username" autoCapitalize="none" autoFocus required />

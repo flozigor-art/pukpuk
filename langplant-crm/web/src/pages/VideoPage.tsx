@@ -784,6 +784,13 @@ export function ActivityText({ a }: { a: Activity }) {
           {base} {data.code} «{data.title}»
         </span>
       )
+    case 'undo':
+    case 'redo':
+      return (
+        <span>
+          {base}: {data.label}
+        </span>
+      )
     case 'day.excused':
       return (
         <span>

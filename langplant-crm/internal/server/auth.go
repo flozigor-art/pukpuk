@@ -65,7 +65,12 @@ func (s *Server) authed(fn handler, adminOnly bool) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden", "message": "Только для администратора"})
 			return
 		}
-		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
+		r = r.WithContext(context.WithValue(r.Context(), userKey, u))
+		if undoTracked(r) {
+			s.serveRecorded(h, w, r, u)
+			return
+		}
+		h.ServeHTTP(w, r)
 	})
 }
 

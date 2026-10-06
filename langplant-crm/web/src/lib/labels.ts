@@ -66,6 +66,8 @@ export const ACTIONS: Record<string, string> = {
   'publication.scheduled': 'поставил(а) отложенную публикацию',
   'comment.added': 'прокомментировал(а)',
   'day.excused': 'отметил(а) уважительную причину',
+  undo: 'отменил(а)',
+  redo: 'вернул(а)',
 }
 
 const has = (s: string, re: RegExp) => re.test(s.toLowerCase())

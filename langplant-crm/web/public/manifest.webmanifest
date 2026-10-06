@@ -1,7 +1,6 @@
 {
   "name": "LangPlant CRM",
   "short_name": "LangPlant",
-  "description": "Ролики, архив материалов, план публикаций и музыка",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f6f6f3",

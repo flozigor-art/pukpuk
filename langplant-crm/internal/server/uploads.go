@@ -244,7 +244,14 @@ func (s *Server) handlePutUpload(w http.ResponseWriter, r *http.Request) error {
 	if received < u.size {
 		return ok(w, map[string]any{"received": received, "done": false})
 	}
+	// the new file or track becomes one undoable step
+	step, berr := s.undoBegin(currentUser(r).ID, "action")
 	result, err := s.finishUpload(u, hex.EncodeToString(h.Sum(nil)), currentUser(r))
+	if berr == nil {
+		if st, _ := s.undoEnd(step); st != nil && err == nil {
+			result["undo_step"] = st.ID
+		}
+	}
 	if err != nil {
 		return err
 	}

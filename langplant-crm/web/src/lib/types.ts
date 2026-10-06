@@ -236,6 +236,24 @@ export interface Comment {
   edited_at: number | null
 }
 
+export interface UndoItem {
+  id: ID
+  kind: 'action' | 'undo' | 'redo'
+  label: string
+  user_id: ID | null
+  video_id: ID | null
+  admin_only: boolean
+  target_id: ID | null
+  undone: boolean
+  undone_by_user: ID | null
+  undone_at: number | null
+  created_at: number
+  updated_at: number
+  video_code?: string
+  blocked: boolean
+  blocked_by: ID | null
+}
+
 export interface Activity {
   id: ID
   user_id: ID | null

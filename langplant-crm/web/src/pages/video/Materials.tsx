@@ -445,7 +445,7 @@ export function ArchiveStatus({ variant, compact }: { variant: VariantSummary; c
           <CircleCheck size={13} /> обязательные файлы на месте
         </span>
       )
-    return compact ? null : <span className="chip">для архива нужны: {variant.missing.map((k) => d.kindByKey.get(k)?.name ?? k).join(', ')}</span>
+    return compact ? null : <span className="chip wrap">для архива нужны: {variant.missing.map((k) => d.kindByKey.get(k)?.name ?? k).join(', ')}</span>
   }
   if (!variant.missing.length)
     return (
