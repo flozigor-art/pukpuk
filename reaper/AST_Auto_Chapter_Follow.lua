@@ -1,11 +1,12 @@
 --[[
-  AST Auto Chapter Follow — FINAL v2.4
-  ------------------------------------
+  AST Auto Chapter Follow — v2.5
+  ------------------------------
   Deterministic chapter follower + *** organizer.
 
   Core rules:
     * every REAPER region is a chapter;
-    * chapter region = active owned item pack + 1.5 s on both sides;
+    * chapter region = owned items of its active pack + 1.5 s on both sides
+      (clamped at 0:00);
     * all project items participate; overlaps are one occupied timeline entity;
     * gap <= 10 s keeps/rejoins a pack; gap > 10 s splits it;
     * when one old chapter is split by a manual item move, the old region stays
@@ -14,15 +15,38 @@
     * detached old-owned items remember their chapter and rejoin if they come back;
     * when a detached part of one chapter is moved into another existing chapter,
       only that part changes ownership: the source region shrinks and the target
-      region expands; an ambiguous whole-chapter collision still asks to merge;
+      region expands;
+    * when two chapters' active packs become one <= 10 s pack the script asks to
+      merge. Right after a manual move "No" undoes that move; otherwise (after
+      recording, on startup, a bridging take) "No" leaves both chapters as they
+      are and each region keeps covering only its own items;
     * a manual region drawn around exactly one detached old-owned pack adopts that
       pack as a new chapter, including after script/REAPER restart;
-    * a truly empty/orphan region is deleted after two settled observations;
+    * a truly empty/orphan region is deleted after two separate settled cycles;
     * regions longer than 59:45 are red; when shorter they return to default color;
 
+  Layout safety (no item is ever placed on top of another item):
+    * a reflow moves only whole physical packs, never a part of a pack;
+    * EVERYTHING left of the chapter being placed takes part in the packing:
+      other chapters, detached pieces, material without a region (for example a
+      first chapter recorded before the first ***). Chapters keep >= 60 s between
+      region edges; material physically connected (<= 10 s) to the chapter on
+      its right is separated by 60 s as well (otherwise it would be glued into
+      it); any other material keeps its original distance and only moves
+      rigidly together with its right neighbour, and only as far as needed;
+    * before anything is written, the planned layout is verified: if any pair of
+      items that did not overlap before would overlap afterwards, nothing is done;
+    * while recording, nothing at or after the point where recording started is
+      ever moved; such a reflow waits until recording stops;
+    * stars that sit inside the moving material travel with the item they resolve
+      to (their meaning is preserved). Boundary stars of the current chapter sit
+      on the fixed side and are never moved.
+
   *** rules:
-    * markers < 5 s apart: delete the later one silently;
+    * markers < 5 s apart: delete the later one (timeline) silently; the kept one
+      inherits the older insertion rank, so a pending role is never lost;
     * pending *** markers are ordered by insertion chronology, not timeline position;
+      a marker restored by Undo keeps its old rank;
     * at most 3 pending *** markers; newest insertions beyond 3 are deleted;
     * marker in silence -> boundary is the next item start;
     * marker inside exactly one item and <= 15 s from that item's start -> the
@@ -31,19 +55,30 @@
     * with A+B, finalize A->B once B chapter has >=3 items and >45 s occupied audio;
     * with A+B+C, finalize A->B immediately (maturity override);
     * while only A+B exist, moving the second marker before the first resolved
-      boundary is a harmless pending edit: wait silently until C makes the order
-      actionable instead of warning before the new chapter has been recorded;
+      boundary is a harmless pending edit: wait silently; with C the order must be
+      A < B < C, otherwise BLOCK;
     * if A->B has no items, after recording warn and delete A;
     * hard gaps >10 s inside the chapter being finalized are silently reduced to 9 s;
     * finalized chapters are packed with >=60 s between regions;
+    * A->B reuses an existing region only when that region's whole active pack lies
+      inside A->B; pieces of other chapters inside A->B are transferred to it;
     * if there is no room before 0:00, never interrupt recording; after recording
-      offer to insert +1 hour at project start, then rescan and continue;
+      offer to insert +1 hour at project start (again after every recording stop
+      while the problem persists), then rescan and continue;
     * a newly inserted valid *** that divides owned material of one existing region
       is a one-shot split command: old region stays left, a new "rename" region is
       created on the right, a 60 s chapter gap is established, and that triggering
-      *** is consumed immediately without touching other *** markers;
+      *** is consumed immediately without touching other *** markers. A split
+      command that cannot be executed yet stays pending and is ignored by the
+      A/B/C organizer;
     * for the current chapter, helper markers "40 min" and "50 min" are created
-      at +40:00 and +50:00 from its resolved first item once those times are reached.
+      at +40:00 and +50:00 from its resolved first item once those times are
+      reached (during recording the live play position counts).
+
+  Undo:
+    * every script edit is one undo point named "Chapter automation: ...";
+    * when the user undoes one of those points the script pauses until the user
+      makes the next change, so it never immediately redoes what was undone.
 
   Persistence:
     * each item stores its historical chapter region ID in P_EXT:AST_CHAPTER_REGION.
@@ -55,9 +90,9 @@
       runtime state from the currently active project.
 
   Notes:
-    * no automation/envelope handling by design;
-    * ordinary project markers move with rigid chapter packages;
-    * *** markers are semantic boundaries and are never moved by chapter reflow.
+    * no automation/envelope handling by design (the +1 h shift uses REAPER's own
+      "insert empty space", so envelopes and tempo follow it);
+    * ordinary project markers move with rigid chapter packages.
 ]]
 
 ------------------------------------------------------------
@@ -74,6 +109,7 @@ local STAR_NAME             = "***"
 local NEW_REGION_NAME       = "rename"
 local STAR_DUPLICATE_SEC    = 5.0
 local STAR_ITEM_WINDOW_SEC  = 15.0
+local MAX_PENDING_STARS     = 3
 
 local HELPER_40_NAME        = "40 min"
 local HELPER_50_NAME        = "50 min"
@@ -94,11 +130,16 @@ local RECORD_SCAN_SEC       = 0.75
 local STAR_SCAN_SEC         = 0.75
 local GESTURE_RELEASE_SEC   = 0.18
 local ORPHAN_CONFIRMATIONS  = 2
+local REC_GUARD_MARGIN      = 1.0
+local MAX_PASSES_PER_CYCLE  = 8
 
 local EPS                   = 0.0005
 local MOVE_EPS              = 0.002
+local STAR_RESTORE_EPS      = 0.001
 
 local ITEM_EXT_KEY          = "P_EXT:AST_CHAPTER_REGION"
+local UNDO_TAG              = "Chapter automation: "
+local MSG_TITLE             = "Chapter automation"
 
 local proj = reaper.EnumProjects(-1, "")
 if not proj then return end
@@ -115,9 +156,9 @@ local OWNER_KEY = "chapter_final_owner_global"
 local LEGACY_OWNER_KEY = "chapter_follower_owner_global"
 
 local INSTANCE_TOKEN = string.format(
-    "final-v2.3@%.9f@%s",
+    "final-v2.5@%.9f@%s",
     reaper.time_precise(),
-    tostring({}):gsub("table: ", "")
+    (tostring({}):gsub("table: ", ""))
 )
 local LEGACY_EVICT_TOKEN = "FINAL@" .. INSTANCE_TOKEN
 
@@ -163,8 +204,11 @@ end
 
 set_toggle(1)
 reaper.atexit(function()
-    set_toggle(0)
-    if reaper.GetExtState(SYNC_SECTION, OWNER_KEY) == INSTANCE_TOKEN then
+    local owner = reaper.GetExtState(SYNC_SECTION, OWNER_KEY)
+    -- A newer instance that took over owns the toolbar state now; switching the
+    -- button off here would show "off" while that instance is running.
+    if owner == INSTANCE_TOKEN or owner == "" then set_toggle(0) end
+    if owner == INSTANCE_TOKEN then
         reaper.DeleteExtState(SYNC_SECTION, OWNER_KEY, false)
     end
     if reaper.GetExtState(SYNC_SECTION, LEGACY_OWNER_KEY) == LEGACY_EVICT_TOKEN then
@@ -177,7 +221,8 @@ end)
 ------------------------------------------------------------
 
 local prev_snap = nil
-local orphan_seen = {}
+local orphan_seen = {}      -- rid -> { count = n, cycle = id of last counted cycle }
+local cycle_id = 0
 
 -- Marker insertion chronology is runtime state. Existing markers found on script
 -- startup are seeded in timeline order; every marker observed later is appended.
@@ -185,6 +230,8 @@ local orphan_seen = {}
 -- for spatial calculations.
 local star_birth_seq = {}
 local star_birth_counter = 0
+local star_last_pos = {}
+local star_tomb = {}        -- id -> { seq, pos } of stars that disappeared (Undo may restore them)
 local local_split_pending = {}
 
 local last_state = reaper.GetProjectStateChangeCount(proj)
@@ -195,10 +242,23 @@ local last_record_scan = -math.huge
 local last_star_scan = -math.huge
 local last_helper_scan = -math.huge
 
-local last_collision_signature = ""
+-- Recording bookkeeping. rec_start_pos is where the running recording began;
+-- nothing at or after it may be moved while recording. record_session counts
+-- finished recordings so "after recording" offers are repeated once per stop.
+local was_recording = false
+local rec_start_pos = nil
+local record_session = 0
+
+-- A follow-up cycle requested by the previous one (orphan confirmation).
+local recheck_at = nil
+
+local prompted_collisions = {}
 local last_blocker_signature = ""
+local last_split_block_signature = ""
 local last_space_signature = ""
 local last_empty_signature = ""
+local last_multi_signature = ""
+local last_unsafe_signature = ""
 
 local HAS_JS_MOUSE = reaper.APIExists and reaper.APIExists("JS_Mouse_GetState")
 local MOUSE_BUTTON_MASK = 1 | 2 | 64
@@ -218,6 +278,42 @@ local function is_recording()
         return (reaper.GetPlayStateEx(proj) & 4) ~= 0
     end
     return (reaper.GetPlayState() & 4) ~= 0
+end
+
+local function play_position()
+    if reaper.GetPlayPositionEx then return reaper.GetPlayPositionEx(proj) end
+    return reaper.GetPlayPosition()
+end
+
+local function cursor_position()
+    if reaper.GetCursorPositionEx then return reaper.GetCursorPositionEx(proj) end
+    return reaper.GetCursorPosition()
+end
+
+-- Earliest timeline position the running recording can write to. The edit
+-- cursor stays at the record start while recording; the first observed play
+-- position covers pre-roll; with repeat on, loop recording may wrap back to the
+-- loop start; in auto-punch mode the take starts at the time selection.
+local function observe_recording_start()
+    local p = min(cursor_position(), play_position())
+    local getloop = reaper.GetSet_LoopTimeRange2
+    if getloop and reaper.GetSetRepeatEx and reaper.GetSetRepeatEx(proj, -1) == 1 then
+        local ls, le = getloop(proj, false, true, 0, 0, false)
+        if le > ls + EPS then p = min(p, ls) end
+    end
+    if getloop and reaper.GetToggleCommandStateEx
+        and reaper.GetToggleCommandStateEx(0, 40076) == 1 then -- time selection auto punch
+        local ts, te = getloop(proj, false, false, 0, 0, false)
+        if te > ts + EPS then p = min(p, ts) end
+    end
+    return max(0, p)
+end
+
+-- Nothing whose current extent reaches this position may move while recording.
+local function recording_guard()
+    if not is_recording() then return nil end
+    if not rec_start_pos then rec_start_pos = observe_recording_start() end
+    return rec_start_pos - REC_GUARD_MARGIN
 end
 
 local function mouse_gesture_active(now)
@@ -279,6 +375,10 @@ local function table_count(t)
     return n
 end
 
+local function is_star_name(name)
+    return name == STAR_NAME or (name and name:match("^%s*(.-)%s*$") == STAR_NAME)
+end
+
 -- Return the currently active project and a stable identity signature for the
 -- set of open project tabs. Sorting makes tab reordering irrelevant: only
 -- opening/closing tabs changes the signature.
@@ -299,10 +399,31 @@ local function get_project_context()
 end
 
 local function ids_signature(ids)
-    table.sort(ids)
+    local copy = {}
+    for i = 1, #ids do copy[i] = ids[i] end
+    table.sort(copy)
     local out = {}
-    for i = 1, #ids do out[i] = tostring(ids[i]) end
+    for i = 1, #copy do out[i] = tostring(copy[i]) end
     return table.concat(out, ",")
+end
+
+local function is_own_undo(desc)
+    return type(desc) == "string" and desc:sub(1, #UNDO_TAG) == UNDO_TAG
+end
+
+-- True right after the user undid one of this script's undo points.
+local function own_action_on_redo_stack()
+    if not reaper.Undo_CanRedo2 then return false end
+    return is_own_undo(reaper.Undo_CanRedo2(proj))
+end
+
+local function own_action_on_undo_stack()
+    if not reaper.Undo_CanUndo2 then return false end
+    return is_own_undo(reaper.Undo_CanUndo2(proj))
+end
+
+local function message(text)
+    reaper.ShowMessageBox(text, MSG_TITLE, 0)
 end
 
 ------------------------------------------------------------
@@ -310,15 +431,8 @@ end
 ------------------------------------------------------------
 
 local function find_entry_by_id(id, want_region)
-    local total = reaper.GetNumRegionsOrMarkers
-        and reaper.GetNumRegionsOrMarkers(proj)
-        or select(1, reaper.CountProjectMarkers(proj))
-
-    if not reaper.GetNumRegionsOrMarkers then
-        local _, nm, nr = reaper.CountProjectMarkers(proj)
-        total = nm + nr
-    end
-
+    local _, nm, nr = reaper.CountProjectMarkers(proj)
+    local total = nm + nr
     for i = 0, total - 1 do
         local rv, isrgn, s, e, name, found_id, color = reaper.EnumProjectMarkers3(proj, i)
         if rv > 0 and isrgn == want_region and found_id == id then
@@ -336,7 +450,7 @@ local function write_entry_by_id(id, isrgn, s, e, name, color)
     if not x then return false end
     return reaper.SetProjectMarkerByIndex2(
         proj, x.enum_idx, isrgn, s, isrgn and e or 0,
-        id, name or "", color or x.color or 0, 0
+        id, name or x.name or "", color or x.color or 0, 0
     )
 end
 
@@ -362,23 +476,50 @@ local function set_region_default_or_red(rid, make_red)
     )
 end
 
+local function add_chapter_region(s, e)
+    local rid = reaper.AddProjectMarker2(proj, true, max(0, s), e, NEW_REGION_NAME, -1, 0)
+    if not rid or rid < 0 then return nil end
+    return rid
+end
+
 ------------------------------------------------------------
 -- *** insertion chronology
 ------------------------------------------------------------
+
+local function birth_less(a, b)
+    local sa = star_birth_seq[a.id] or math.huge
+    local sb = star_birth_seq[b.id] or math.huge
+    if sa == sb then return a.id < b.id end
+    return sa < sb
+end
 
 local function sync_star_birth_order(snap)
     local present = {}
     for i = 1, #snap.stars do present[snap.stars[i].id] = snap.stars[i] end
 
-    -- Forget markers that no longer exist so a future reused marker ID is fresh.
-    for id in pairs(star_birth_seq) do
-        if not present[id] then star_birth_seq[id] = nil end
+    -- A marker that disappears keeps a tombstone: if Undo restores the very same
+    -- marker (same ID, same position) it gets its old rank back instead of
+    -- becoming the newest pending marker.
+    for id, seq in pairs(star_birth_seq) do
+        if not present[id] then
+            star_tomb[id] = { seq = seq, pos = star_last_pos[id] }
+            star_birth_seq[id] = nil
+            star_last_pos[id] = nil
+        end
     end
 
     local newcomers = {}
     for i = 1, #snap.stars do
         local st = snap.stars[i]
-        if not star_birth_seq[st.id] then newcomers[#newcomers + 1] = st end
+        if not star_birth_seq[st.id] then
+            local tomb = star_tomb[st.id]
+            if tomb and tomb.pos and abs(tomb.pos - st.pos) <= STAR_RESTORE_EPS then
+                star_birth_seq[st.id] = tomb.seq
+            else
+                newcomers[#newcomers + 1] = st
+            end
+            star_tomb[st.id] = nil
+        end
     end
 
     if #newcomers > 0 then
@@ -401,18 +542,26 @@ local function sync_star_birth_order(snap)
         end
     end
 
+    for i = 1, #snap.stars do star_last_pos[snap.stars[i].id] = snap.stars[i].pos end
+
     snap.stars_by_birth = {}
     for i = 1, #snap.stars do snap.stars_by_birth[i] = snap.stars[i] end
-    table.sort(snap.stars_by_birth, function(a, b)
-        local sa = star_birth_seq[a.id] or math.huge
-        local sb = star_birth_seq[b.id] or math.huge
-        if sa == sb then return a.id < b.id end
-        return sa < sb
-    end)
+    table.sort(snap.stars_by_birth, birth_less)
 end
 
 local function stars_in_birth_order(snap)
     return snap.stars_by_birth or snap.stars
+end
+
+-- Pending chapter markers for the A/B/C organizer: split commands that are still
+-- waiting (blocked / no space / recording) are not chapter boundaries.
+local function pending_stars(snap)
+    local out = {}
+    local ordered = stars_in_birth_order(snap)
+    for i = 1, #ordered do
+        if not local_split_pending[ordered[i].id] then out[#out + 1] = ordered[i] end
+    end
+    return out
 end
 
 ------------------------------------------------------------
@@ -434,26 +583,28 @@ local function read_snapshot()
     local nitems = reaper.CountMediaItems(proj)
     for i = 0, nitems - 1 do
         local item = reaper.GetMediaItem(proj, i)
-        local s = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
-        local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
-        local guid = get_item_guid(item)
-        local d = {
-            item = item,
-            guid = guid,
-            s = s,
-            e = s + max(0, len),
-            len = max(0, len),
-            home = get_item_home(item),
-            moved = false,
-            stationary = false
-        }
-        if prev_snap and prev_snap.item_by_guid[guid] then
-            local old = prev_snap.item_by_guid[guid]
-            d.stationary = abs(old.s - d.s) <= MOVE_EPS and abs(old.e - d.e) <= MOVE_EPS
-            d.moved = not d.stationary
+        if item then
+            local s = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+            local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+            local guid = get_item_guid(item)
+            local d = {
+                item = item,
+                guid = guid,
+                s = s,
+                e = s + max(0, len),
+                len = max(0, len),
+                home = get_item_home(item),
+                moved = false,
+                stationary = false
+            }
+            if prev_snap and prev_snap.item_by_guid[guid] then
+                local old = prev_snap.item_by_guid[guid]
+                d.stationary = abs(old.s - d.s) <= MOVE_EPS and abs(old.e - d.e) <= MOVE_EPS
+                d.moved = not d.stationary
+            end
+            snap.items[#snap.items + 1] = d
+            snap.item_by_guid[guid] = d
         end
-        snap.items[#snap.items + 1] = d
-        snap.item_by_guid[guid] = d
     end
     sort_items(snap.items)
 
@@ -470,8 +621,8 @@ local function read_snapshot()
             if isrgn then
                 snap.regions[#snap.regions + 1] = entry
                 snap.region_map[id] = entry
-            elseif name == STAR_NAME then
-                local st = { id = id, pos = s, color = color, enum_idx = i }
+            elseif is_star_name(name) then
+                local st = { id = id, pos = s, color = color, enum_idx = i, name = name }
                 snap.stars[#snap.stars + 1] = st
                 snap.star_map[id] = st
             else
@@ -495,6 +646,10 @@ local function read_snapshot()
 
     sync_star_birth_order(snap)
     return snap
+end
+
+local function commit_prev_snapshot()
+    prev_snap = read_snapshot()
 end
 
 ------------------------------------------------------------
@@ -553,6 +708,19 @@ local function component_home_stats(c)
         end
     end
     return st
+end
+
+-- Span of the items of component c that are owned by rid.
+local function owned_span(c, rid)
+    local s, e = nil, nil
+    for i = 1, #c.items do
+        local d = c.items[i]
+        if d.home == rid then
+            if not s or d.s < s then s = d.s end
+            if not e or d.e > e then e = d.e end
+        end
+    end
+    return s, e
 end
 
 ------------------------------------------------------------
@@ -637,7 +805,7 @@ local function bootstrap_unowned_regions(snap, components)
                 end
                 if seeded > 0 then
                     home_counts[r.id] = seeded
-                    orphan_seen[r.id] = 0
+                    orphan_seen[r.id] = nil
                 end
             end
         end
@@ -787,8 +955,8 @@ local function adopt_manually_wrapped_detached_components(snap, components, acti
             set_item_home(p.items[j].item, p.target)
             p.items[j].home = p.target
         end
-        orphan_seen[p.target] = 0
-        orphan_seen[p.source] = 0
+        orphan_seen[p.target] = nil
+        orphan_seen[p.source] = nil
     end
     reaper.PreventUIRefresh(-1)
     return true
@@ -865,11 +1033,10 @@ local function transfer_detached_items_between_chapters(snap, components, active
             set_item_home(p.items[j].item, p.target)
             p.items[j].home = p.target
         end
-        orphan_seen[p.target] = 0
-        for rid in pairs(p.sources) do orphan_seen[rid] = 0 end
+        orphan_seen[p.target] = nil
+        for rid in pairs(p.sources) do orphan_seen[rid] = nil end
     end
     reaper.PreventUIRefresh(-1)
-    last_collision_signature = ""
     return true
 end
 
@@ -938,27 +1105,40 @@ local function resolve_star(snap, star, limit_pos)
     return { status = "WAIT", reason = "NO_NEXT_ITEM", star = star }
 end
 
-local function star_blocks_acquisition(snap, active_component, item)
+-- Unlimited resolution of every star, cached per snapshot.
+local function star_resolutions(snap)
+    if not snap.star_res then
+        snap.star_res = {}
+        for i = 1, #snap.stars do
+            local st = snap.stars[i]
+            snap.star_res[st.id] = resolve_star(snap, st, math.huge)
+        end
+    end
+    return snap.star_res
+end
+
+local function star_blocks_acquisition(snap, anchor, item)
+    local resolved = star_resolutions(snap)
     for i = 1, #snap.stars do
         local st = snap.stars[i]
-        local res = resolve_star(snap, st, math.huge)
+        local res = resolved[st.id]
         local boundary = nil
         if res.status == "VALID" then boundary = res.boundary end
 
         if boundary then
-            if active_component.e <= boundary + EPS and item.s >= boundary - EPS then
+            if anchor.e <= boundary + EPS and item.s >= boundary - EPS then
                 return true
             end
-            if active_component.s >= boundary - EPS and item.e <= boundary + EPS then
+            if anchor.s >= boundary - EPS and item.e <= boundary + EPS then
                 return true
             end
         elseif res.status == "BLOCK" then
             -- Conservative around an ambiguous live boundary: never acquire fresh
             -- material through it. Historical ownership is intentionally preserved.
-            if active_component.e <= st.pos + EPS and item.e > st.pos + EPS then
+            if anchor.e <= st.pos + EPS and item.e > st.pos + EPS then
                 return true
             end
-            if active_component.s >= st.pos - EPS and item.s < st.pos - EPS then
+            if anchor.s >= st.pos - EPS and item.s < st.pos - EPS then
                 return true
             end
         end
@@ -980,33 +1160,33 @@ local function new_star_id_set(snap)
     return out
 end
 
-local function enforce_star_capacity(snap)
-    if #snap.stars <= 3 then return false end
-
-    local by_birth = {}
-    for i = 1, #snap.stars do by_birth[i] = snap.stars[i] end
-    table.sort(by_birth, function(a, b)
-        local sa = star_birth_seq[a.id] or math.huge
-        local sb = star_birth_seq[b.id] or math.huge
-        if sa == sb then return a.id < b.id end
-        return sa < sb
-    end)
-
-    local to_delete = {}
-    for i = #by_birth, 4, -1 do
-        to_delete[#to_delete + 1] = by_birth[i].id
-    end
-    if #to_delete == 0 then return false end
-
+local function delete_star_markers(ids)
+    if #ids == 0 then return false end
+    reaper.Undo_BeginBlock2(proj)
     reaper.PreventUIRefresh(1)
-    for i = 1, #to_delete do
-        reaper.DeleteProjectMarker(proj, to_delete[i], false)
-        local_split_pending[to_delete[i]] = nil
+    for i = 1, #ids do
+        reaper.DeleteProjectMarker(proj, ids[i], false)
+        local_split_pending[ids[i]] = nil
     end
     reaper.PreventUIRefresh(-1)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. "remove extra *** marker", -1)
     return true
+end
+
+local function enforce_star_capacity(snap)
+    if #snap.stars <= MAX_PENDING_STARS then return false end
+
+    local by_birth = {}
+    for i = 1, #snap.stars do by_birth[i] = snap.stars[i] end
+    table.sort(by_birth, birth_less)
+
+    local to_delete = {}
+    for i = #by_birth, MAX_PENDING_STARS + 1, -1 do
+        to_delete[#to_delete + 1] = by_birth[i].id
+    end
+    return delete_star_markers(to_delete)
 end
 
 local function sanitize_stars(snap)
@@ -1018,50 +1198,32 @@ local function sanitize_stars(snap)
         local st = snap.stars[i]
         local prev = kept[#kept]
         if prev and (st.pos - prev.pos) < STAR_DUPLICATE_SEC - EPS then
-            to_delete[st.id] = true -- later chronologically
+            -- The later one on the timeline goes. If it was the older insertion,
+            -- the survivor inherits that rank so A/B/C roles do not shift.
+            to_delete[st.id] = true
+            local sp = star_birth_seq[prev.id]
+            local ss = star_birth_seq[st.id]
+            if ss and (not sp or ss < sp) then star_birth_seq[prev.id] = ss end
         else
             kept[#kept + 1] = st
         end
     end
 
-    local surviving = {}
-    for i = 1, #snap.stars do
-        if not to_delete[snap.stars[i].id] then surviving[#surviving + 1] = snap.stars[i] end
-    end
-
-    if #surviving > 3 then
-        local excess = #surviving - 3
+    if #kept > MAX_PENDING_STARS then
         local by_birth = {}
-        for i = 1, #surviving do by_birth[i] = surviving[i] end
-        table.sort(by_birth, function(a, b)
-            local sa = star_birth_seq[a.id] or math.huge
-            local sb = star_birth_seq[b.id] or math.huge
-            if sa == sb then return a.id < b.id end
-            return sa < sb
-        end)
-
+        for i = 1, #kept do by_birth[i] = kept[i] end
+        table.sort(by_birth, birth_less)
         -- Capacity is about insertion chronology, not timeline chronology. Preserve
         -- the three oldest pending markers and reject every newest excess marker.
-        for i = #by_birth, 1, -1 do
-            if excess <= 0 then break end
-            local st = by_birth[i]
-            if not to_delete[st.id] then
-                to_delete[st.id] = true
-                excess = excess - 1
-            end
+        for i = #by_birth, MAX_PENDING_STARS + 1, -1 do
+            to_delete[by_birth[i].id] = true
         end
     end
 
-    if table_count(to_delete) == 0 then return false end
-
-    reaper.PreventUIRefresh(1)
-    for id in pairs(to_delete) do
-        reaper.DeleteProjectMarker(proj, id, false)
-    end
-    reaper.PreventUIRefresh(-1)
-    reaper.UpdateTimeline()
-    reaper.UpdateArrange()
-    return true
+    local ids = {}
+    for id in pairs(to_delete) do ids[#ids + 1] = id end
+    table.sort(ids)
+    return delete_star_markers(ids)
 end
 
 ------------------------------------------------------------
@@ -1087,10 +1249,10 @@ end
 local function collision_is_new_proximity(c, rids)
     if not prev_snap then return true end
 
-    -- Prompt only when at least one pair of the same chapter-owned material was
-    -- genuinely farther than 10 s before this user action and is connected now.
-    -- A rigid move of the whole project preserves all previous distances and must
-    -- never be interpreted as a merge gesture.
+    -- A fresh collision is one where at least one pair of chapter-owned material
+    -- was genuinely farther than 10 s before this user action and is connected
+    -- now. A rigid move of the whole project preserves all previous distances and
+    -- must never be interpreted as a merge gesture.
     for i = 1, #rids - 1 do
         local a_s, a_e = previous_owned_span_for_current_component(c, rids[i])
         if not a_s then return true end
@@ -1105,7 +1267,9 @@ local function collision_is_new_proximity(c, rids)
     return false
 end
 
-local function collision_candidates(snap, components)
+-- Components that hold owned material of two or more chapters (transfers of
+-- detached pieces have already been applied, so these are real collisions).
+local function collision_list(snap, components)
     local out = {}
     for ci = 1, #components do
         local c = components[ci]
@@ -1118,11 +1282,13 @@ local function collision_candidates(snap, components)
                 if x.moved > 0 then any_moved = true end
             end
         end
-        if #rids >= 2 and any_moved then
+        if #rids >= 2 then
             table.sort(rids)
-            if collision_is_new_proximity(c, rids) then
-                out[#out + 1] = { ci = ci, c = c, stats = st, rids = rids }
-            end
+            out[#out + 1] = {
+                ci = ci, c = c, stats = st, rids = rids,
+                sig = ids_signature(rids),
+                fresh = any_moved and collision_is_new_proximity(c, rids)
+            }
         end
     end
     return out
@@ -1147,6 +1313,8 @@ local function choose_merge_survivor(snap, collision)
 end
 
 local function rollback_user_move()
+    -- Never undo one of our own edits by mistake.
+    if own_action_on_undo_stack() then return false end
     local ok = reaper.Undo_DoUndo2(proj)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
@@ -1167,7 +1335,7 @@ local function merge_collision(snap, collision)
 
     for i = 1, #snap.items do
         local d = snap.items[i]
-        if d.home == survivor or losing[d.home] then
+        if losing[d.home] then
             set_item_home(d.item, survivor)
             d.home = survivor
         end
@@ -1180,40 +1348,62 @@ local function merge_collision(snap, collision)
     reaper.PreventUIRefresh(-1)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
-    reaper.Undo_EndBlock2(proj, "Merge chapter regions", -1)
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. "merge chapter regions", -1)
     return true
 end
 
-local function handle_collisions(snap, components)
-    local list = collision_candidates(snap, components)
-    if #list == 0 then
-        last_collision_signature = ""
-        return false, false
+local function handle_collisions(snap, components, allow_prompts)
+    local list = collision_list(snap, components)
+
+    local live = {}
+    for i = 1, #list do live[list[i].sig] = true end
+    for sig in pairs(prompted_collisions) do
+        if not live[sig] then prompted_collisions[sig] = nil end
     end
 
-    if is_recording() then return false, true end
+    -- Unresolved collisions are not blocking: acquisition skips such a pack and
+    -- each region keeps covering only its own items until the user decides.
+    if #list == 0 or not allow_prompts or is_recording() then return false end
 
-    local col = list[1]
-    local sig = ids_signature(col.rids) .. string.format("@%.6f@%.6f", col.c.s, col.c.e)
-    if sig == last_collision_signature then return false, true end
-    last_collision_signature = sig
+    for i = 1, #list do
+        local col = list[i]
+        if not prompted_collisions[col.sig] then
+            prompted_collisions[col.sig] = true
+            local can_rollback = col.fresh and not own_action_on_undo_stack()
 
-    local result = reaper.ShowMessageBox(
-        "Айтемы двух глав оказались ближе 10 секунд и теперь образуют один физический пакет.\n\n" ..
-        "Объединить главы?\n\n" ..
-        "Да — объединить главы и удалить старый лишний регион.\n" ..
-        "Нет — отменить последнее пользовательское перемещение.",
-        "Chapter automation",
-        4
-    )
+            local text = "Айтемы двух глав оказались ближе 10 секунд и теперь образуют один физический пакет.\n\n" ..
+                "Объединить главы?\n\n" ..
+                "Да — объединить главы и удалить старый лишний регион.\n"
+            if can_rollback then
+                text = text .. "Нет — отменить последнее пользовательское перемещение."
+            else
+                text = text .. "Нет — оставить как есть (каждый регион остаётся на своих айтемах; " ..
+                    "разведите главы вручную)."
+            end
 
-    if result == 6 then -- Yes
-        merge_collision(snap, col)
-    else
-        rollback_user_move()
+            local result = reaper.ShowMessageBox(text, MSG_TITLE, 4)
+            if result == 6 then
+                -- Re-read after the modal dialog and merge only if the very same
+                -- collision still exists.
+                local fresh = read_snapshot()
+                local comps = build_components(fresh.items, PACK_GAP)
+                local again = collision_list(fresh, comps)
+                for j = 1, #again do
+                    if again[j].sig == col.sig then
+                        return merge_collision(fresh, again[j])
+                    end
+                end
+                return false
+            elseif can_rollback then
+                if rollback_user_move() then
+                    commit_prev_snapshot()
+                    return true
+                end
+            end
+            return false
+        end
     end
-
-    return true, true
+    return false
 end
 
 ------------------------------------------------------------
@@ -1224,10 +1414,10 @@ local function acquire_unowned_items(snap, components, active)
     local changed = false
     local active_ci_to_rid = {}
     for rid, ci in pairs(active) do
-        if not active_ci_to_rid[ci] then
+        if active_ci_to_rid[ci] == nil then
             active_ci_to_rid[ci] = rid
         else
-            active_ci_to_rid[ci] = false -- collision; handled elsewhere
+            active_ci_to_rid[ci] = false -- collision; never guess an owner
         end
     end
 
@@ -1235,14 +1425,7 @@ local function acquire_unowned_items(snap, components, active)
         local rid = active_ci_to_rid[ci]
         if rid then
             local c = components[ci]
-            local owned_s, owned_e = nil, nil
-            for j = 1, #c.items do
-                local d = c.items[j]
-                if d.home == rid then
-                    if not owned_s or d.s < owned_s then owned_s = d.s end
-                    if not owned_e or d.e > owned_e then owned_e = d.e end
-                end
-            end
+            local owned_s, owned_e = owned_span(c, rid)
             local anchor = {
                 s = owned_s or c.s,
                 e = owned_e or c.e
@@ -1269,11 +1452,25 @@ local function delete_confirmed_orphans(snap, active)
     for i = 1, #snap.regions do
         local rid = snap.regions[i].id
         if active[rid] then
-            orphan_seen[rid] = 0
+            orphan_seen[rid] = nil
         else
-            orphan_seen[rid] = (orphan_seen[rid] or 0) + 1
-            if orphan_seen[rid] >= ORPHAN_CONFIRMATIONS then
+            -- Count at most one observation per cycle: one cycle runs several
+            -- passes, and "two settled observations" must mean two cycles.
+            local o = orphan_seen[rid]
+            if not o then
+                o = { count = 0, cycle = -1 }
+                orphan_seen[rid] = o
+            end
+            if o.cycle ~= cycle_id then
+                o.count = o.count + 1
+                o.cycle = cycle_id
+            end
+            if o.count >= ORPHAN_CONFIRMATIONS then
                 to_delete[#to_delete + 1] = rid
+            else
+                -- Make sure the confirming observation happens even if the
+                -- project does not change again.
+                recheck_at = reaper.time_precise() + SETTLE_SEC
             end
         end
     end
@@ -1283,6 +1480,7 @@ local function delete_confirmed_orphans(snap, active)
     end
 
     if #to_delete == 0 then return false end
+    reaper.Undo_BeginBlock2(proj)
     reaper.PreventUIRefresh(1)
     for i = 1, #to_delete do
         local rid = to_delete[i]
@@ -1292,6 +1490,7 @@ local function delete_confirmed_orphans(snap, active)
     reaper.PreventUIRefresh(-1)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. "remove empty chapter region", -1)
     return true
 end
 
@@ -1306,36 +1505,26 @@ local function update_region_geometry_and_color(snap, components, active)
     for i = 1, #snap.regions do
         local r = snap.regions[i]
         local ci = active[r.id]
+        local desired_s, desired_e = r.s, r.e
         if ci then
-            local c = components[ci]
-            local desired_s = c.s - REGION_PAD
-            local desired_e = c.e + REGION_PAD
-
-            if desired_s >= -EPS then
-                if desired_s < 0 then desired_s = 0 end
+            local os, oe = owned_span(components[ci], r.id)
+            if os then
+                desired_s = max(0, os - REGION_PAD)
+                desired_e = oe + REGION_PAD
                 if abs(desired_s - r.s) > EPS or abs(desired_e - r.e) > EPS then
                     write_entry_by_id(r.id, true, desired_s, desired_e, r.name, r.color)
                     r.s, r.e = desired_s, desired_e
                     changed = true
                 end
             end
+        end
 
-            local long_now = (desired_e - desired_s) > LONG_REGION_SEC + EPS
-            local is_red = r.color == LONG_REGION_RED
-            if long_now ~= is_red then
-                set_region_default_or_red(r.id, long_now)
-                r.color = long_now and LONG_REGION_RED or 0
-                changed = true
-            end
-        else
-            local duration = r.e - r.s
-            local long_now = duration > LONG_REGION_SEC + EPS
-            local is_red = r.color == LONG_REGION_RED
-            if long_now ~= is_red then
-                set_region_default_or_red(r.id, long_now)
-                r.color = long_now and LONG_REGION_RED or 0
-                changed = true
-            end
+        local long_now = (desired_e - desired_s) > LONG_REGION_SEC + EPS
+        local is_red = r.color == LONG_REGION_RED
+        if long_now ~= is_red then
+            set_region_default_or_red(r.id, long_now)
+            r.color = long_now and LONG_REGION_RED or 0
+            changed = true
         end
     end
 
@@ -1348,11 +1537,12 @@ local function update_region_geometry_and_color(snap, components, active)
 end
 
 local function first_negative_region_requirement(snap, components, active)
+    local best = nil
     for rid, ci in pairs(active) do
-        local c = components[ci]
-        if c.s - REGION_PAD < -EPS then return rid end
+        local os = owned_span(components[ci], rid)
+        if os and os - REGION_PAD < -EPS and (not best or rid < best) then best = rid end
     end
-    return nil
+    return best
 end
 
 ------------------------------------------------------------
@@ -1360,23 +1550,50 @@ end
 ------------------------------------------------------------
 
 local function shift_entire_project_one_hour()
-    local getloop = reaper.GetSet_LoopTimeRange2 or function(_, a,b,c,d,e)
-        return reaper.GetSet_LoopTimeRange(a,b,c,d,e)
+    local getloop = reaper.GetSet_LoopTimeRange2 or function(_, a, b, c, d, e)
+        return reaper.GetSet_LoopTimeRange(a, b, c, d, e)
     end
-    local cursor = reaper.GetCursorPositionEx and reaper.GetCursorPositionEx(proj)
-        or reaper.GetCursorPosition()
+    local cursor = cursor_position()
 
     local ts_s, ts_e = getloop(proj, false, false, 0, 0, false)
     local lp_s, lp_e = getloop(proj, false, true, 0, 0, false)
+
+    local before = read_snapshot()
 
     reaper.Undo_BeginBlock2(proj)
     reaper.PreventUIRefresh(1)
 
     getloop(proj, true, false, 0, PROJECT_SHIFT_SEC, false)
     if reaper.Main_OnCommandEx then
-        reaper.Main_OnCommandEx(40200, 0, proj)
+        reaper.Main_OnCommandEx(40200, 0, proj) -- Insert empty space at time selection
     else
         reaper.Main_OnCommand(40200, 0)
+    end
+
+    -- Verify the result. Locked items/markers (or a REAPER preference) may have
+    -- kept something in place; shift every such leftover manually so the whole
+    -- project really moves as one rigid block.
+    local after = read_snapshot()
+    for guid, d in pairs(before.item_by_guid) do
+        local a = after.item_by_guid[guid]
+        if a and abs(a.s - d.s) <= MOVE_EPS then
+            reaper.SetMediaItemInfo_Value(a.item, "D_POSITION", d.s + PROJECT_SHIFT_SEC)
+        end
+    end
+    local after_entries = {}
+    for i = 1, #after.entries do
+        local x = after.entries[i]
+        after_entries[(x.isrgn and "R" or "M") .. x.id] = x
+    end
+    for i = 1, #before.entries do
+        local x = before.entries[i]
+        local a = after_entries[(x.isrgn and "R" or "M") .. x.id]
+        if a and abs(a.s - x.s) <= EPS then
+            write_entry_by_id(
+                x.id, x.isrgn, x.s + PROJECT_SHIFT_SEC,
+                x.isrgn and (x.e + PROJECT_SHIFT_SEC) or 0, x.name, x.color
+            )
+        end
     end
 
     if ts_e > ts_s + EPS then
@@ -1397,11 +1614,16 @@ local function shift_entire_project_one_hour()
     reaper.PreventUIRefresh(-1)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
-    reaper.Undo_EndBlock2(proj, "Insert 1 hour at project start", -1)
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. "insert 1 hour at project start", -1)
+
+    -- Our own rigid move is not a user gesture.
+    commit_prev_snapshot()
 end
 
+-- Offered only when not recording, once per problem and recording session.
 local function offer_space_shift(signature)
     if is_recording() then return false end
+    signature = signature .. "#rec" .. tostring(record_session)
     if signature == last_space_signature then return false end
     last_space_signature = signature
 
@@ -1410,8 +1632,8 @@ local function offer_space_shift(signature)
         "не хватает места перед началом проекта.\n\n" ..
         "Нужно сдвинуть весь проект на 1:00:00 вперед.\n\n" ..
         "OK — вставить один час в начало проекта и продолжить.\n" ..
-        "Cancel — ничего пока не менять.",
-        "Chapter automation",
+        "Cancel — ничего пока не менять (предложение повторится после следующей записи).",
+        MSG_TITLE,
         1
     )
     if result == 1 then
@@ -1436,18 +1658,6 @@ local function items_between_boundaries(snap, left_boundary, right_boundary)
         end
     end
     sort_items(out)
-    return out
-end
-
-local function region_ids_in_items(snap, items)
-    local set = {}
-    for i = 1, #items do
-        local rid = items[i].home
-        if rid and snap.region_map[rid] then set[rid] = true end
-    end
-    local out = {}
-    for rid in pairs(set) do out[#out + 1] = rid end
-    table.sort(out)
     return out
 end
 
@@ -1513,86 +1723,291 @@ local function compute_compaction(items)
 end
 
 ------------------------------------------------------------
--- Build active chapter packages from regions
+-- Reflow planner: place a chapter before the fixed material on its right
 ------------------------------------------------------------
+--
+-- spec = {
+--   target_items  = items of the chapter being placed (moved as one unit),
+--   target_pos    = optional guid -> position after internal compaction,
+--   compaction    = optional compute_compaction() result (for markers),
+--   right_wall    = items starting at/after this position never move,
+--   anchor        = padded start of the fixed chapter on the right,
+--   target_rid    = region that will describe the target (or nil),
+--   consumed_star = *** marker deleted by this operation (never moved),
+-- }
+--
+-- Every item that starts before right_wall and is not part of the target is
+-- "left material". It is grouped into physical packs (<= 10 s) and each pack is
+-- moved rigidly, right to left, only as far as needed. Nothing is ever split,
+-- nothing is left behind under a moved chapter, and the final layout is checked
+-- for overlaps before the plan is accepted.
 
-local function active_region_packages(snap, components, active)
-    local out = {}
-    for i = 1, #snap.regions do
-        local r = snap.regions[i]
-        local ci = active[r.id]
-        if ci then
+local function verify_no_new_overlap(items, new_pos)
+    local arr = {}
+    for i = 1, #items do
+        local d = items[i]
+        local ns = new_pos[d.guid] or d.s
+        arr[i] = { d = d, ns = ns, ne = ns + d.len }
+    end
+    table.sort(arr, function(a, b)
+        if a.ns ~= b.ns then return a.ns < b.ns end
+        return a.d.guid < b.d.guid
+    end)
+
+    local open = {}
+    for i = 1, #arr do
+        local x = arr[i]
+        local keep = {}
+        for j = 1, #open do
+            local a = open[j]
+            if a.ne > x.ns + EPS then
+                keep[#keep + 1] = a
+                local now_ov = min(a.ne, x.ne) - max(a.ns, x.ns)
+                if now_ov > EPS and interval_overlap(a.d.s, a.d.e, x.d.s, x.d.e) <= EPS then
+                    return false, a.d, x.d
+                end
+            end
+        end
+        keep[#keep + 1] = x
+        open = keep
+    end
+    return true
+end
+
+local function plan_reflow(snap, components, active, spec)
+    local in_target = {}
+    local ts, te, raw_s, raw_e
+    for i = 1, #spec.target_items do
+        local d = spec.target_items[i]
+        in_target[d.guid] = true
+        local s = (spec.target_pos and spec.target_pos[d.guid]) or d.s
+        if not ts or s < ts then ts = s end
+        if not te or s + d.len > te then te = s + d.len end
+        if not raw_s or d.s < raw_s then raw_s = d.s end
+        if not raw_e or d.e > raw_e then raw_e = d.e end
+    end
+    if not ts then return nil, "EMPTY" end
+
+    local target = {
+        is_target = true, chapter = true, items = spec.target_items,
+        base_s = ts - REGION_PAD, base_e = te + REGION_PAD,
+        orig_s = raw_s - REGION_PAD, orig_e = raw_e + REGION_PAD
+    }
+
+    -- Left material, grouped into rigid physical packs.
+    local left = {}
+    for i = 1, #snap.items do
+        local d = snap.items[i]
+        if not in_target[d.guid] and d.s < spec.right_wall - EPS then left[#left + 1] = d end
+    end
+    local blocks = build_components(left, PACK_GAP)
+
+    -- A pack is a "chapter" pack when it carries a region's active material.
+    local active_owner = {}
+    for rid, ci in pairs(active) do
+        local c = components[ci]
+        for j = 1, #c.items do
+            local d = c.items[j]
+            if d.home == rid then active_owner[d.guid] = rid end
+        end
+    end
+    for bi = 1, #blocks do
+        local b = blocks[bi]
+        b.base_s = b.s - REGION_PAD
+        b.base_e = b.e + REGION_PAD
+        b.orig_s, b.orig_e = b.base_s, b.base_e
+        for j = 1, #b.items do
+            if active_owner[b.items[j].guid] then b.chapter = true; break end
+        end
+    end
+
+    local chain = {}
+    for bi = 1, #blocks do chain[bi] = blocks[bi] end
+    chain[#chain + 1] = target
+
+    -- Right-to-left packing. Each pack moves only as far as needed:
+    --   * the target keeps LAYOUT_GAP to the fixed chapter on its right;
+    --   * two chapter packs keep LAYOUT_GAP between their regions;
+    --   * material physically connected (<= 10 s) to its right neighbour gets
+    --     LAYOUT_GAP too, otherwise it would be glued to that chapter;
+    --   * any other pair keeps its original distance (already > 10 s), so
+    --     region-less material only travels rigidly with its neighbour.
+    local wall = spec.anchor
+    for i = #chain, 1, -1 do
+        local b = chain[i]
+        local gap = LAYOUT_GAP
+        if i < #chain then
+            local r = chain[i + 1]
+            local padded_gap = r.base_s - b.base_e
+            local connected = padded_gap + 2 * REGION_PAD <= PACK_GAP + EPS
+            if not (b.chapter and r.chapter) and not connected then
+                gap = min(LAYOUT_GAP, padded_gap)
+            end
+        end
+        local limit_e = wall - gap
+        b.delta = (b.base_e > limit_e + EPS) and (limit_e - b.base_e) or 0
+        b.new_s = b.base_s + b.delta
+        b.new_e = b.base_e + b.delta
+        wall = b.new_s
+    end
+
+    -- New item positions + validation.
+    local guard = recording_guard()
+    local new_pos, orig_pos, block_of = {}, {}, {}
+    for i = 1, #chain do
+        local b = chain[i]
+        for j = 1, #b.items do
+            local d = b.items[j]
+            block_of[d.guid] = b
+            local base = d.s
+            if b.is_target and spec.target_pos and spec.target_pos[d.guid] then
+                base = spec.target_pos[d.guid]
+            end
+            local np = base + b.delta
+            if abs(np - d.s) > MOVE_EPS then
+                if np < -EPS then return nil, "NOT_ENOUGH_SPACE" end
+                if guard and d.e > guard - EPS then return nil, "RECORDING" end
+                new_pos[d.guid] = np
+                orig_pos[d.guid] = d.s
+            end
+        end
+        if b.delta < -EPS and b.new_s < -EPS then return nil, "NOT_ENOUGH_SPACE" end
+    end
+
+    if not verify_no_new_overlap(snap.items, new_pos) then return nil, "UNSAFE" end
+
+    -- Regions of moved chapter packs travel with their pack.
+    local region_moves = {}
+    for rid, ci in pairs(active) do
+        local r = snap.region_map[rid]
+        if r and rid ~= spec.target_rid then
             local c = components[ci]
-            out[#out + 1] = {
-                rid = r.id,
-                region = r,
-                items = c.items,
-                base_s = c.s - REGION_PAD,
-                base_e = c.e + REGION_PAD,
-                delta = 0
-            }
+            local pack, mixed = nil, false
+            for j = 1, #c.items do
+                local d = c.items[j]
+                if d.home == rid then
+                    local b = block_of[d.guid]
+                    if not b or b.is_target or (pack and pack ~= b) then mixed = true break end
+                    pack = b
+                end
+            end
+            if pack and not mixed and abs(pack.delta) > EPS then
+                region_moves[#region_moves + 1] = {
+                    id = rid, s = max(0, r.s + pack.delta), e = r.e + pack.delta,
+                    name = r.name, color = r.color
+                }
+            end
         end
     end
-    table.sort(out, function(a, b)
-        if abs(a.base_s - b.base_s) <= EPS then return a.rid < b.rid end
-        return a.base_s < b.base_s
-    end)
-    return out
+
+    -- Ordinary markers inside a moved pack (padded, original geometry) follow it.
+    local marker_moves = {}
+    for i = 1, #snap.markers do
+        local m = snap.markers[i]
+        local best, best_dist = nil, math.huge
+        for j = 1, #chain do
+            local b = chain[j]
+            if m.s >= b.orig_s - EPS and m.s <= b.orig_e + EPS then
+                local dist = abs(m.s - (b.orig_s + b.orig_e) * 0.5)
+                if dist < best_dist then best, best_dist = b, dist end
+            end
+        end
+        if best then
+            local delta = best.delta
+            if best.is_target and spec.compaction then
+                delta = delta + spec.compaction.delta_for_point(m.s)
+            end
+            if abs(delta) > EPS then
+                marker_moves[#marker_moves + 1] = {
+                    id = m.id, pos = max(0, m.s + delta), name = m.name, color = m.color
+                }
+            end
+        end
+    end
+
+    -- *** markers keep pointing at the same item: a star that resolves to an item
+    -- of moving material travels with that item. Stars resolving to fixed
+    -- material (the current chapter boundaries) stay exactly where they are.
+    local star_moves = {}
+    local resolved = star_resolutions(snap)
+    for i = 1, #snap.stars do
+        local st = snap.stars[i]
+        if st.id ~= spec.consumed_star then
+            local res = resolved[st.id]
+            if res.status == "VALID" and res.starter and new_pos[res.starter.guid] then
+                local delta = new_pos[res.starter.guid] - res.starter.s
+                star_moves[#star_moves + 1] = {
+                    id = st.id, pos = max(0, st.pos + delta), name = st.name, color = st.color
+                }
+            end
+        end
+    end
+
+    return {
+        target = target,
+        chain = chain,
+        new_pos = new_pos,
+        orig_pos = orig_pos,
+        region_moves = region_moves,
+        marker_moves = marker_moves,
+        star_moves = star_moves
+    }
 end
 
-local function chapter_for_marker_point(p, packages)
-    local best, best_dist = nil, math.huge
-    for i = 1, #packages do
-        local ch = packages[i]
-        if p >= ch.base_s - EPS and p <= ch.base_e + EPS then
-            local center = (ch.base_s + ch.base_e) * 0.5
-            local dist = abs(p - center)
-            if dist < best_dist then best, best_dist = ch, dist end
-        end
+-- Apply a plan as one undo point. Items are resolved again by GUID from a fresh
+-- read (pointers may change after Undo) and must still be where the plan saw
+-- them; otherwise nothing is written.
+local function apply_reflow(plan, undo_name, before_moves, after_moves)
+    local live = read_snapshot()
+    for guid, from in pairs(plan.orig_pos) do
+        local d = live.item_by_guid[guid]
+        if not d or abs(d.s - from) > MOVE_EPS then return false end
     end
-    return best
+
+    reaper.Undo_BeginBlock2(proj)
+    reaper.PreventUIRefresh(1)
+
+    local ok = true
+    if before_moves then ok = before_moves(live) ~= false end
+
+    if ok then
+        for guid, np in pairs(plan.new_pos) do
+            reaper.SetMediaItemInfo_Value(live.item_by_guid[guid].item, "D_POSITION", np)
+        end
+        for i = 1, #plan.region_moves do
+            local x = plan.region_moves[i]
+            write_entry_by_id(x.id, true, x.s, x.e, x.name, x.color)
+        end
+        for i = 1, #plan.marker_moves do
+            local x = plan.marker_moves[i]
+            write_entry_by_id(x.id, false, x.pos, 0, x.name, x.color)
+        end
+        for i = 1, #plan.star_moves do
+            local x = plan.star_moves[i]
+            write_entry_by_id(x.id, false, x.pos, 0, x.name, x.color)
+        end
+        if after_moves then ok = after_moves(live) ~= false end
+    end
+
+    reaper.PreventUIRefresh(-1)
+    reaper.UpdateTimeline()
+    reaper.UpdateArrange()
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. undo_name, -1)
+
+    -- Our own rigid moves are not user gestures.
+    commit_prev_snapshot()
+    return ok
 end
 
-------------------------------------------------------------
--- Generic right-to-left packing before an anchor
-------------------------------------------------------------
-
-local function plan_pack_before_anchor(packages, target, anchor_start)
-    local chapters = {}
-    for i = 1, #packages do
-        local ch = packages[i]
-        if ch.rid ~= target.rid and ch.base_s < anchor_start - EPS then
-            chapters[#chapters + 1] = ch
-        end
-    end
-    chapters[#chapters + 1] = target
-
-    table.sort(chapters, function(a, b)
-        if abs(a.base_s - b.base_s) <= EPS then
-            if a.is_target ~= b.is_target then return not a.is_target end
-            return (a.rid or math.huge) < (b.rid or math.huge)
-        end
-        return a.base_s < b.base_s
-    end)
-
-    if chapters[#chapters] ~= target then
-        return nil, "OTHER_REGION_AFTER_TARGET"
-    end
-
-    local anchor = anchor_start
-    for i = #chapters, 1, -1 do
-        local ch = chapters[i]
-        local desired_end = anchor - LAYOUT_GAP
-        ch.delta = ch.base_e > desired_end + EPS and (desired_end - ch.base_e) or 0
-        ch.new_s = ch.base_s + ch.delta
-        ch.new_e = ch.base_e + ch.delta
-        anchor = ch.new_s
-    end
-
-    if chapters[1] and chapters[1].new_s < -EPS then
-        return nil, "NOT_ENOUGH_SPACE"
-    end
-    return chapters
+local function report_unsafe_once(sig)
+    if is_recording() or sig == last_unsafe_signature then return end
+    last_unsafe_signature = sig
+    message(
+        "Главу нельзя автоматически разместить без наложения айтемов друг на друга, " ..
+        "поэтому скрипт ничего не изменил.\n\n" ..
+        "Проверьте монтаж слева от текущей главы (наложения, айтемы между главами) " ..
+        "и разведите материал вручную."
+    )
 end
 
 ------------------------------------------------------------
@@ -1623,8 +2038,10 @@ local function geometry_same_except_stars(a, b)
 end
 
 local function try_remove_new_star_from_undo(snap, star)
+    if is_recording() then return false end
     if not prev_snap or prev_snap.star_map[star.id] then return false end
     if not geometry_same_except_stars(snap, prev_snap) then return false end
+    if own_action_on_undo_stack() then return false end
 
     local ok = reaper.Undo_DoUndo2(proj)
     if ok == 0 then return false end
@@ -1646,8 +2063,7 @@ end
 ------------------------------------------------------------
 
 local function find_region_split_by_star(snap, components, active, star)
-    local limit = math.huge
-    local res = resolve_star(snap, star, limit)
+    local res = resolve_star(snap, star, math.huge)
     if res.status ~= "VALID" then return nil, res end
     local boundary = res.boundary
 
@@ -1673,113 +2089,83 @@ local function find_region_split_by_star(snap, components, active, star)
     return nil, res
 end
 
-local function apply_existing_region_split(snap, components, active, split, star)
-    local rid = split.rid
-    local old_region = snap.region_map[rid]
-    if not old_region then return false end
-
-    local left, right = {}, {}
-    for i = 1, #snap.items do
-        local d = snap.items[i]
-        if d.home == rid then
-            if d.s < split.boundary - EPS then left[#left + 1] = d else right[#right + 1] = d end
+local function build_split_plan(snap, components, active, split, star)
+    local c = split.c
+    local target_items, right_items = {}, {}
+    for j = 1, #c.items do
+        local d = c.items[j]
+        if d.s < split.boundary - EPS then
+            target_items[#target_items + 1] = d
+        else
+            right_items[#right_items + 1] = d
         end
     end
-    if #left == 0 or #right == 0 then return false end
-    sort_items(left); sort_items(right)
+    if #target_items == 0 or #right_items == 0 then return nil, "EMPTY" end
 
-    local left_comps = build_components(left, PACK_GAP)
-    local right_comps = build_components(right, PACK_GAP)
-    -- Existing active chapter was connected. If historical detached pieces exist,
-    -- only the earliest resulting pack is the physical chapter on each side.
-    local left_active = left_comps[#left_comps] or nil
-    local right_active = right_comps[1] or nil
-    if not left_active or not right_active then return false end
+    local rs, re = nil, nil
+    for i = 1, #right_items do
+        local d = right_items[i]
+        if not rs or d.s < rs then rs = d.s end
+        if not re or d.e > re then re = d.e end
+    end
 
-    local target = {
-        rid = rid,
-        region = old_region,
-        items = left_active.items,
-        base_s = left_active.s - REGION_PAD,
-        base_e = left_active.e + REGION_PAD,
-        is_target = true,
-        delta = 0
-    }
-    local right_s = right_active.s - REGION_PAD
-    local right_e = right_active.e + REGION_PAD
+    local plan, reason = plan_reflow(snap, components, active, {
+        target_items = target_items,
+        right_wall = split.boundary,
+        anchor = rs - REGION_PAD,
+        target_rid = split.rid,
+        consumed_star = star.id
+    })
+    if not plan then return nil, reason end
+    plan.rid = split.rid
+    plan.boundary = split.boundary
+    plan.right_s = rs - REGION_PAD
+    plan.right_e = re + REGION_PAD
+    return plan
+end
 
-    local packages = active_region_packages(snap, components, active)
-    local plan, reason = plan_pack_before_anchor(packages, target, right_s)
-    if not plan then
-        if reason == "NOT_ENOUGH_SPACE" then
-            local sig = "split@" .. tostring(star.id) .. "@" .. tostring(rid)
-            if offer_space_shift(sig) then return true end
+local function apply_existing_region_split(snap, plan, star)
+    local rid = plan.rid
+    local rebased = try_remove_new_star_from_undo(snap, star)
+    local new_rid = nil
+
+    local ok = apply_reflow(plan, "split chapter at ***",
+        function()
+            -- If the only user action was inserting this fresh ***, it has just
+            -- been undone above, so one Ctrl+Z returns to the pre-marker state.
+            -- Otherwise the marker is consumed inside this undo block.
+            if not rebased then reaper.DeleteProjectMarker(proj, star.id, false) end
+            return true
+        end,
+        function(live)
+            local r = live.region_map[rid]
+            if not r then return false end
+            write_entry_by_id(rid, true, max(0, plan.target.new_s), plan.target.new_e, r.name, r.color)
+
+            new_rid = add_chapter_region(plan.right_s, plan.right_e)
+            if not new_rid then return false end
+
+            for i = 1, #live.items do
+                local d = live.items[i]
+                if d.home == rid then
+                    -- live positions are pre-move; right material never moves.
+                    if d.s >= plan.boundary - EPS then set_item_home(d.item, new_rid) end
+                elseif d.home == new_rid then
+                    set_item_home(d.item, nil) -- stale reference to a reused region ID
+                end
+            end
+            return true
         end
+    )
+
+    if not ok then
+        if rebased then reaper.Undo_DoRedo2(proj) end
         return false
     end
 
-    -- If the only user action was inserting this fresh ***, undo that insertion
-    -- before opening our own block. Then one Ctrl+Z later returns directly to the
-    -- pre-marker/pre-split project state. If safe rebasing is impossible, consume
-    -- the marker inside our block as a fallback (that rare case may need two undos).
-    local marker_insertion_undone = try_remove_new_star_from_undo(snap, star)
-
-    reaper.Undo_BeginBlock2(proj)
-    reaper.PreventUIRefresh(1)
-
-    if not marker_insertion_undone then
-        reaper.DeleteProjectMarker(proj, star.id, false)
-    end
-
-    -- Move packed old/earlier chapters.
-    for i = 1, #plan do
-        local ch = plan[i]
-        if abs(ch.delta) > EPS then
-            for j = 1, #ch.items do
-                local d = ch.items[j]
-                reaper.SetMediaItemInfo_Value(d.item, "D_POSITION", d.s + ch.delta)
-            end
-        end
-        if ch.region then
-            write_entry_by_id(
-                ch.region.id, true, ch.new_s, ch.new_e,
-                ch.region.name, ch.region.color
-            )
-        end
-    end
-
-    -- Ordinary markers inside rigidly moved packages.
-    for i = 1, #snap.markers do
-        local m = snap.markers[i]
-        local ch = chapter_for_marker_point(m.s, plan)
-        if ch and abs(ch.delta) > EPS then
-            write_entry_by_id(m.id, false, m.s + ch.delta, 0, m.name, m.color)
-        end
-    end
-
-    -- The right half is a brand new chapter and stays where the user put it.
-    local new_rid = reaper.AddProjectMarker2(
-        proj, true, right_s, right_e, NEW_REGION_NAME, -1, 0
-    )
-    if new_rid < 0 then
-        reaper.PreventUIRefresh(-1)
-        reaper.Undo_EndBlock2(proj, "Split chapter FAILED", -1)
-        error("AST chapter split: AddProjectMarker2 failed")
-    end
-
-    for i = 1, #right do
-        set_item_home(right[i].item, new_rid)
-    end
-    for i = 1, #left do
-        set_item_home(left[i].item, rid)
-    end
-
-    reaper.PreventUIRefresh(-1)
-    reaper.UpdateTimeline()
-    reaper.UpdateArrange()
-    reaper.Undo_EndBlock2(proj, "Split chapter at ***", -1)
-
     local_split_pending[star.id] = nil
+    orphan_seen[rid] = nil
+    if new_rid then orphan_seen[new_rid] = nil end
     return true
 end
 
@@ -1791,7 +2177,18 @@ local function star_inside_existing_region(snap, star)
     return false
 end
 
-local function process_new_region_star_splits(snap, components, active)
+local function split_block_text(res)
+    if res.reason == "OVERLAP" then
+        return "под маркером одновременно находится несколько айтемов"
+    elseif res.reason == "DEEP_ITEM" then
+        return string.format("маркер стоит слишком глубоко внутри айтема (%.1f сек от его начала)", res.offset or 0)
+    elseif res.reason == "MULTI_REGION" then
+        return "маркер одновременно делит несколько регионов"
+    end
+    return "граница главы неоднозначна"
+end
+
+local function process_new_region_star_splits(snap, components, active, allow_prompts)
     -- Clean pending command IDs that the user removed manually.
     for id in pairs(local_split_pending) do
         if not snap.star_map[id] then local_split_pending[id] = nil end
@@ -1806,32 +2203,33 @@ local function process_new_region_star_splits(snap, components, active)
             local split, res = find_region_split_by_star(snap, components, active, star)
             if split then
                 local_split_pending[star.id] = true
-                last_blocker_signature = ""
-                local changed = apply_existing_region_split(snap, components, active, split, star)
-                -- A valid local split command owns this cycle even when it is
-                -- waiting for +1h space; it must never fall through to A/B/C logic.
-                return changed, true
+                last_split_block_signature = ""
+                local plan, reason = build_split_plan(snap, components, active, split, star)
+                if plan then
+                    return apply_existing_region_split(snap, plan, star)
+                end
+                if reason == "NOT_ENOUGH_SPACE" and allow_prompts then
+                    local sig = "split@" .. tostring(star.id) .. "@" .. tostring(split.rid)
+                    if offer_space_shift(sig) then return true end
+                elseif reason == "UNSAFE" and allow_prompts then
+                    report_unsafe_once("split@" .. tostring(star.id))
+                end
+                -- RECORDING / declined space: the command waits; one split per cycle.
+                return false
             elseif res and res.status == "BLOCK" and star_inside_existing_region(snap, star) then
                 local_split_pending[star.id] = true
-                if not is_recording() then
+                if allow_prompts and not is_recording() then
                     local sig = "localsplitblock@" .. tostring(star.id) .. "@" .. tostring(res.reason)
-                    if sig ~= last_blocker_signature then
-                        last_blocker_signature = sig
-                        local why = res.reason == "OVERLAP"
-                            and "под маркером одновременно находится несколько айтемов"
-                            or (res.reason == "DEEP_ITEM"
-                                and string.format("маркер стоит слишком глубоко внутри айтема (%.1f сек от его начала)", res.offset or 0)
-                                or "граница главы неоднозначна")
-                        reaper.ShowMessageBox(
-                            "Невозможно автоматически разделить главу по ***: " .. why .. ".\n\n" ..
+                    if sig ~= last_split_block_signature then
+                        last_split_block_signature = sig
+                        message(
+                            "Невозможно автоматически разделить главу по ***: " .. split_block_text(res) .. ".\n\n" ..
                             "Разберите монтаж в районе маркера так, чтобы *** стоял в пустоте " ..
-                            "или не дальше 15 секунд от начала единственного айтема.",
-                            "Chapter automation",
-                            0
+                            "или не дальше 15 секунд от начала единственного айтема."
                         )
                     end
                 end
-                return false, true
+                return false
             elseif local_split_pending[star.id] then
                 -- The user edited the project so the marker no longer divides an
                 -- existing chapter. Release it back to ordinary pending-star logic.
@@ -1839,7 +2237,7 @@ local function process_new_region_star_splits(snap, components, active)
             end
         end
     end
-    return false, false
+    return false
 end
 
 ------------------------------------------------------------
@@ -1857,14 +2255,17 @@ local function blocker_text(res, which)
         )
     elseif res.reason == "MULTI_REGION" then
         return which .. " *** одновременно делит несколько регионов"
+    elseif res.reason == "ORDER" then
+        return "второй *** стоит на таймлайне раньше первого"
+    elseif res.reason == "ORDER3" then
+        return "третий *** стоит на таймлайне раньше второго"
     end
     return which .. " *** имеет неоднозначную границу"
 end
 
-local function classify_pending_pair(snap)
-    if #snap.stars < 2 then return nil end
-    local ordered = stars_in_birth_order(snap)
-    local A, B, C = ordered[1], ordered[2], ordered[3]
+local function classify_pending_pair(snap, stars)
+    if #stars < 2 then return nil end
+    local A, B, C = stars[1], stars[2], stars[3]
 
     local ar = resolve_star(snap, A, B.pos)
     local br = resolve_star(snap, B, C and C.pos or math.huge)
@@ -1885,14 +2286,17 @@ local function classify_pending_pair(snap)
         -- exists, A->B must be finalized and the crossed boundaries are genuinely
         -- ambiguous, therefore the normal blocker becomes appropriate.
         if not C then return { status = "WAIT", A=A,B=B,C=C, ar=ar, br=br } end
-        return { status = "BLOCK", which = "Второй", res = {reason="ORDER"}, A=A,B=B,C=C }
+        return { status = "BLOCK", which = "Второй", res = { reason = "ORDER" }, A=A,B=B,C=C }
+    end
+    if C and C.pos < B.pos - EPS then
+        return { status = "BLOCK", which = "Третий", res = { reason = "ORDER3" }, A=A,B=B,C=C }
     end
 
     local previous = items_between_boundaries(snap, ar.boundary, br.boundary)
-    local current_right = C and resolve_star(snap, C, math.huge) or nil
     local current_limit = math.huge
     if C then
-        if current_right and current_right.status == "VALID" then
+        local current_right = resolve_star(snap, C, math.huge)
+        if current_right.status == "VALID" then
             current_limit = current_right.boundary
         else
             -- We only need B->C for the third-star override; C itself may not yet
@@ -1926,253 +2330,194 @@ end
 local function build_finalize_plan(snap, components, active, scan)
     if #scan.previous == 0 then return nil, "EMPTY" end
 
-    local region_ids = region_ids_in_items(snap, scan.previous)
-    if #region_ids > 1 then return nil, "MULTIPLE_REGIONS" end
+    local in_prev = {}
+    for i = 1, #scan.previous do in_prev[scan.previous[i].guid] = true end
 
-    local existing_rid = region_ids[1]
+    -- A->B reuses an existing region only if that region's whole active pack lies
+    -- inside A->B. Pieces of chapters whose main pack is elsewhere are simply
+    -- transferred to the A->B chapter; their regions are left untouched.
+    local candidates = {}
+    for rid, ci in pairs(active) do
+        local c = components[ci]
+        local any, all = false, true
+        for j = 1, #c.items do
+            local d = c.items[j]
+            if d.home == rid then
+                if in_prev[d.guid] then any = true else all = false end
+            end
+        end
+        if any and all then candidates[#candidates + 1] = rid end
+    end
+    table.sort(candidates)
+    if #candidates > 1 then return nil, "MULTIPLE_REGIONS" end
+    local existing_rid = candidates[1]
+
     local compaction = compute_compaction(scan.previous)
     if not compaction.s or not compaction.e then return nil, "EMPTY" end
 
-    local target_region = existing_rid and snap.region_map[existing_rid] or nil
-    local target = {
-        rid = existing_rid,
-        region = target_region,
-        items = scan.previous,
-        base_s = compaction.s - REGION_PAD,
-        base_e = compaction.e + REGION_PAD,
-        is_target = true,
-        delta = 0,
-        compaction = compaction
-    }
-
-    local anchor_start
+    local anchor
     if #scan.current > 0 then
         local cmin = math.huge
         for i = 1, #scan.current do if scan.current[i].s < cmin then cmin = scan.current[i].s end end
-        anchor_start = cmin - REGION_PAD
+        anchor = cmin - REGION_PAD
     else
-        anchor_start = scan.B.pos
+        anchor = scan.B.pos
     end
 
-    local packages = active_region_packages(snap, components, active)
-    local plan, reason = plan_pack_before_anchor(packages, target, anchor_start)
+    local plan, reason = plan_reflow(snap, components, active, {
+        target_items = scan.previous,
+        target_pos = compaction.pos,
+        compaction = compaction,
+        right_wall = scan.br.boundary,
+        anchor = anchor,
+        target_rid = existing_rid,
+        consumed_star = scan.A.id
+    })
     if not plan then return nil, reason end
-
-    return {
-        chapters = plan,
-        target = target,
-        anchor_start = anchor_start,
-        existing_rid = existing_rid
-    }
+    plan.existing_rid = existing_rid
+    plan.scan = scan
+    return plan
 end
 
-local function apply_finalize_plan(snap, scan, plan)
-    local target = plan.target
-    local target_final_delta = target.delta
+local function apply_finalize_plan(plan)
+    local scan = plan.scan
+    local target_set = {}
+    for i = 1, #scan.previous do target_set[scan.previous[i].guid] = true end
+    local final_rid = nil
 
-    reaper.Undo_BeginBlock2(proj)
-    reaper.PreventUIRefresh(1)
-
-    -- Move earlier rigid chapter packages and target items. Target gets its internal
-    -- >10 -> 9 s compaction first, then its global layout delta.
-    for i = 1, #plan.chapters do
-        local ch = plan.chapters[i]
-        if ch == target then
-            for j = 1, #target.items do
-                local d = target.items[j]
-                local base = target.compaction.pos[d.guid] or d.s
-                reaper.SetMediaItemInfo_Value(d.item, "D_POSITION", base + target_final_delta)
-            end
-        elseif abs(ch.delta) > EPS then
-            for j = 1, #ch.items do
-                local d = ch.items[j]
-                reaper.SetMediaItemInfo_Value(d.item, "D_POSITION", d.s + ch.delta)
-            end
+    local ok = apply_reflow(plan, "finalize chapter and maintain 60s layout", nil, function(live)
+        local rid = plan.existing_rid
+        local s, e = max(0, plan.target.new_s), plan.target.new_e
+        local r = rid and live.region_map[rid] or nil
+        if r then
+            write_entry_by_id(rid, true, s, e, r.name, r.color)
+        else
+            rid = add_chapter_region(s, e)
+            if not rid then return false end
         end
-    end
+        final_rid = rid
 
-    -- Existing regions move with their packages. Target region (if it already
-    -- exists) is resized to the compacted chapter; otherwise it is created below.
-    for i = 1, #plan.chapters do
-        local ch = plan.chapters[i]
-        if ch.region then
-            write_entry_by_id(
-                ch.region.id, true, ch.new_s, ch.new_e,
-                ch.region.name, ch.region.color
-            )
-        end
-    end
-
-    -- Ordinary markers follow their chapter. Target markers additionally receive
-    -- the local compaction delta nearest to their original occupied component.
-    for i = 1, #snap.markers do
-        local m = snap.markers[i]
-        local moved = false
-
-        if m.s >= scan.ar.boundary - EPS and m.s < scan.br.boundary - EPS then
-            local local_delta = target.compaction.delta_for_point(m.s)
-            write_entry_by_id(
-                m.id, false, m.s + local_delta + target_final_delta,
-                0, m.name, m.color
-            )
-            moved = true
-        end
-
-        if not moved then
-            local ch = chapter_for_marker_point(m.s, plan.chapters)
-            if ch and ch ~= target and abs(ch.delta) > EPS then
-                write_entry_by_id(m.id, false, m.s + ch.delta, 0, m.name, m.color)
-            end
-        end
-    end
-
-    local rid = plan.existing_rid
-    if not rid then
-        rid = reaper.AddProjectMarker2(
-            proj, true, target.new_s, target.new_e,
-            NEW_REGION_NAME, -1, 0
-        )
-        if rid < 0 then
-            reaper.PreventUIRefresh(-1)
-            reaper.Undo_EndBlock2(proj, "Finalize chapter FAILED", -1)
-            error("AST finalize: AddProjectMarker2 failed")
-        end
-    else
-        -- A live *** boundary is authoritative for FINALIZATION. Historical
-        -- ownership may cross a star while the user is editing/moving material,
-        -- but once A->B is finalized this region must forget every old-owned item
-        -- outside the semantic A->B chapter or the follower could jump back to it.
-        local target_set = {}
-        for i = 1, #target.items do target_set[target.items[i].guid] = true end
-        for i = 1, #snap.items do
-            local d = snap.items[i]
-            if d.home == rid and not target_set[d.guid] then
+        -- A live *** boundary is authoritative for FINALIZATION: the region owns
+        -- exactly the A->B items. Any other item still pointing at this region ID
+        -- (outside the chapter, or a stale reference to a reused ID) forgets it.
+        for i = 1, #live.items do
+            local d = live.items[i]
+            if target_set[d.guid] then
+                set_item_home(d.item, rid)
+            elseif d.home == rid then
                 set_item_home(d.item, nil)
             end
         end
-    end
 
-    for i = 1, #target.items do
-        set_item_home(target.items[i].item, rid)
-    end
+        -- A is consumed only after the region definitely exists.
+        reaper.DeleteProjectMarker(proj, scan.A.id, false)
+        return true
+    end)
 
-    -- A is consumed only after the region definitely exists.
-    reaper.DeleteProjectMarker(proj, scan.A.id, false)
-
-    reaper.PreventUIRefresh(-1)
-    reaper.UpdateTimeline()
-    reaper.UpdateArrange()
-    reaper.Undo_EndBlock2(proj, "Finalize chapter and maintain 60s layout", -1)
-    return true
+    if final_rid then orphan_seen[final_rid] = nil end
+    return ok
 end
 
-local function handle_empty_pair(scan)
-    if is_recording() then return false end
+local function handle_empty_pair(scan, allow_prompts)
+    if is_recording() or not allow_prompts then return false end
     local sig = string.format("empty@%d@%.6f@%d@%.6f", scan.A.id, scan.A.pos, scan.B.id, scan.B.pos)
     if sig == last_empty_signature then return false end
     last_empty_signature = sig
 
-    reaper.ShowMessageBox(
+    message(
         "Между первым и вторым *** нет айтемов.\n\n" ..
-        "Первый *** будет удалён, второй останется началом текущей главы.",
-        "Chapter automation",
-        0
+        "Первый *** будет удалён, второй останется началом текущей главы."
     )
+    -- The modal dialog may have taken a while: delete A only if it is still there.
+    local fresh = read_snapshot()
+    if not fresh.star_map[scan.A.id] then return false end
     reaper.Undo_BeginBlock2(proj)
     reaper.DeleteProjectMarker(proj, scan.A.id, false)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
-    reaper.Undo_EndBlock2(proj, "Remove empty chapter marker", -1)
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. "remove empty chapter marker", -1)
     return true
 end
 
-local function process_pending_pairs()
-    while true do
-        local snap = read_snapshot()
-        if sanitize_stars(snap) then
-            -- Re-read after any marker deletion.
-            goto continue
-        end
-        if #snap.stars < 2 then
-            last_blocker_signature = ""
-            last_empty_signature = ""
-            return false
-        end
-
-        local scan = classify_pending_pair(snap)
-        if not scan then return false end
-
-        if scan.status == "BLOCK" then
-            if not is_recording() then
-                local sig = string.format(
-                    "block@%d@%.6f@%d@%.6f@%s",
-                    scan.A.id, scan.A.pos, scan.B.id, scan.B.pos,
-                    tostring(scan.res and scan.res.reason)
-                )
-                if sig ~= last_blocker_signature then
-                    last_blocker_signature = sig
-                    reaper.ShowMessageBox(
-                        "Автоматическое создание главы остановлено: " ..
-                        blocker_text(scan.res, scan.which) .. ".\n\n" ..
-                        "Разберите монтаж у этого маркера. Нормальный вариант — *** в пустоте; " ..
-                        "допустимый вариант — внутри единственного айтема, но не дальше 15 секунд от его начала.",
-                        "Chapter automation",
-                        0
-                    )
-                end
-            end
-            return false
-        end
-
+-- One organizer step. Returns true when the project was changed (the caller then
+-- runs another follower pass and calls this again).
+local function organizer_step(allow_prompts)
+    local snap = read_snapshot()
+    local stars = pending_stars(snap)
+    if #stars < 2 then
         last_blocker_signature = ""
-        if scan.status == "WAIT" then return false end
+        last_empty_signature = ""
+        return false
+    end
 
-        if #scan.previous == 0 then
-            return handle_empty_pair(scan)
-        end
+    local scan = classify_pending_pair(snap, stars)
+    if not scan then return false end
 
-        if not pending_is_mature(scan) then return false end
-
-        -- Build follower ownership only for layout protection; organizer selection
-        -- itself is purely boundary-based and never depends on owner_by_component.
-        local components = build_components(snap.items, PACK_GAP)
-        clear_stale_homes(snap)
-        bootstrap_unowned_regions(snap, components)
-        components = build_components(snap.items, PACK_GAP)
-        local active = choose_active_components(snap, components)
-
-        local plan, reason = build_finalize_plan(snap, components, active, scan)
-        if not plan then
-            if reason == "EMPTY" then
-                return handle_empty_pair(scan)
-            elseif reason == "NOT_ENOUGH_SPACE" then
-                local sig = string.format("finalspace@%d@%.6f@%d@%.6f", scan.A.id, scan.A.pos, scan.B.id, scan.B.pos)
-                if offer_space_shift(sig) then
-                    goto continue
-                end
-                return false
-            elseif reason == "MULTIPLE_REGIONS" and not is_recording() then
-                local sig = string.format("multirgn@%d@%d", scan.A.id, scan.B.id)
-                if sig ~= last_blocker_signature then
-                    last_blocker_signature = sig
-                    reaper.ShowMessageBox(
-                        "Между первым и вторым *** уже находятся айтемы нескольких разных регионов-глав.\n\n" ..
-                        "Автоматически угадывать, какой регион уничтожать или объединять, скрипт не будет.",
-                        "Chapter automation",
-                        0
-                    )
-                end
-                return false
-            else
-                return false
+    if scan.status == "BLOCK" then
+        if allow_prompts and not is_recording() then
+            local sig = string.format(
+                "block@%d@%.6f@%d@%.6f@%s",
+                scan.A.id, scan.A.pos, scan.B.id, scan.B.pos,
+                tostring(scan.res and scan.res.reason)
+            )
+            if sig ~= last_blocker_signature then
+                last_blocker_signature = sig
+                message(
+                    "Автоматическое создание главы остановлено: " ..
+                    blocker_text(scan.res, scan.which) .. ".\n\n" ..
+                    "Разберите монтаж у этого маркера. Нормальный вариант — *** в пустоте; " ..
+                    "допустимый вариант — внутри единственного айтема, но не дальше 15 секунд от его начала."
+                )
             end
         end
-
-        last_space_signature = ""
-        apply_finalize_plan(snap, scan, plan)
-        -- A consumed; re-read. If C existed, B+C are now the normal pair.
-        ::continue::
+        return false
     end
+
+    last_blocker_signature = ""
+    if scan.status == "WAIT" then return false end
+
+    if #scan.previous == 0 then
+        return handle_empty_pair(scan, allow_prompts)
+    end
+
+    if not pending_is_mature(scan) then return false end
+
+    local components = build_components(snap.items, PACK_GAP)
+    local active = choose_active_components(snap, components)
+
+    local plan, reason = build_finalize_plan(snap, components, active, scan)
+    if not plan then
+        if reason == "EMPTY" then
+            return handle_empty_pair(scan, allow_prompts)
+        elseif reason == "NOT_ENOUGH_SPACE" then
+            if allow_prompts then
+                local sig = string.format("finalspace@%d@%d", scan.A.id, scan.B.id)
+                return offer_space_shift(sig)
+            end
+        elseif reason == "MULTIPLE_REGIONS" then
+            if allow_prompts and not is_recording() then
+                local sig = string.format("multirgn@%d@%d", scan.A.id, scan.B.id)
+                if sig ~= last_multi_signature then
+                    last_multi_signature = sig
+                    message(
+                        "Между первым и вторым *** уже находятся айтемы нескольких разных регионов-глав.\n\n" ..
+                        "Автоматически угадывать, какой регион уничтожать или объединять, скрипт не будет."
+                    )
+                end
+            end
+        elseif reason == "UNSAFE" then
+            if allow_prompts then
+                report_unsafe_once(string.format("final@%d@%d", scan.A.id, scan.B.id))
+            end
+        end
+        -- RECORDING: the reflow would touch material at/after the recording
+        -- position; it simply waits for the recording to stop.
+        return false
+    end
+
+    last_space_signature = ""
+    last_multi_signature = ""
+    return apply_finalize_plan(plan)
 end
 
 ------------------------------------------------------------
@@ -2195,15 +2540,23 @@ end
 
 local function update_duration_helper_markers()
     local snap = read_snapshot()
-    if #snap.stars == 0 then return false end
+    local stars = pending_stars(snap)
+    if #stars == 0 then return false end
 
-    local ordered = stars_in_birth_order(snap)
-    local star = ordered[#ordered]
-    if not star or local_split_pending[star.id] then return false end
-
+    local star = stars[#stars]
+    local recording = is_recording()
     local res = resolve_star(snap, star, math.huge)
-    if res.status ~= "VALID" or not res.starter then return false end
-    local chapter_start = res.boundary
+
+    local chapter_start = nil
+    if res.status == "VALID" and res.starter then
+        chapter_start = res.boundary
+    elseif res.status == "WAIT" and recording and rec_start_pos
+        and rec_start_pos >= star.pos - EPS then
+        -- First take of a brand-new chapter: its first item will start where the
+        -- running recording started.
+        chapter_start = rec_start_pos
+    end
+    if not chapter_start then return false end
 
     local latest_end = nil
     for i = 1, #snap.items do
@@ -2211,6 +2564,12 @@ local function update_duration_helper_markers()
         if d.s >= chapter_start - EPS then
             if not latest_end or d.e > latest_end then latest_end = d.e end
         end
+    end
+    -- While recording, the take in progress is not an item yet: the live play
+    -- position tells how far the chapter has been recorded.
+    if recording then
+        local pp = play_position()
+        if pp >= chapter_start - EPS and (not latest_end or pp > latest_end) then latest_end = pp end
     end
     if not latest_end then return false end
 
@@ -2247,7 +2606,7 @@ local function update_duration_helper_markers()
     reaper.PreventUIRefresh(-1)
     reaper.UpdateTimeline()
     reaper.UpdateArrange()
-    reaper.Undo_EndBlock2(proj, "Update chapter 40/50 minute helpers", -1)
+    reaper.Undo_EndBlock2(proj, UNDO_TAG .. "update 40/50 minute helpers", -1)
     return true
 end
 
@@ -2255,21 +2614,23 @@ end
 -- One follower pass
 ------------------------------------------------------------
 
+-- Returns true when the project was changed structurally and the caller should
+-- start a new pass from a fresh snapshot.
 local function follower_pass(allow_prompts)
     local snap = read_snapshot()
 
     -- The hard cap still wins: a fourth insertion is rejected as the newest marker
     -- before it can act as a split command. With one/two/three stars, however, a
     -- fresh local split gets first refusal and cannot consume unrelated markers.
-    if enforce_star_capacity(snap) then return true, false end
+    if enforce_star_capacity(snap) then return true end
 
     local early_components = build_components(snap.items, PACK_GAP)
     local early_active = choose_active_components(snap, early_components)
-    local split_changed, split_blocked = process_new_region_star_splits(snap, early_components, early_active)
-    if split_changed then return true, false end
-    if split_blocked then return false, true end
+    if process_new_region_star_splits(snap, early_components, early_active, allow_prompts) then
+        return true
+    end
 
-    if sanitize_stars(snap) then return true, false end
+    if sanitize_stars(snap) then return true end
     if clear_stale_homes(snap) then
         snap = read_snapshot()
     end
@@ -2293,19 +2654,15 @@ local function follower_pass(allow_prompts)
 
     -- A detached piece that has joined exactly one other active chapter is a
     -- transfer, not a merge. This also repairs the same persisted state after a
-    -- script/REAPER restart. Ambiguous collisions still fall through to the old
-    -- merge-or-undo dialog below.
+    -- script/REAPER restart. Real collisions fall through to the dialog below.
     if transfer_detached_items_between_chapters(snap, components, active) then
         snap = read_snapshot()
         components = build_components(snap.items, PACK_GAP)
         active = choose_active_components(snap, components)
     end
 
-    -- Critical ordering: an ambiguous collision prompt/rollback still happens
-    -- before acquisition or region geometry writes.
-    local mutated, blocked = handle_collisions(snap, components)
-    if mutated then return true, false end
-    if blocked then return false, true end
+    -- Collision prompt/rollback happens before acquisition or geometry writes.
+    if handle_collisions(snap, components, allow_prompts) then return true end
 
     if acquire_unowned_items(snap, components, active) then
         snap = read_snapshot()
@@ -2313,21 +2670,20 @@ local function follower_pass(allow_prompts)
         active = choose_active_components(snap, components)
     end
 
+    -- A chapter that starts closer than 1.5 s to 0:00 cannot have its full pad.
+    -- Offer the +1 h shift (not blocking anything); meanwhile the region is
+    -- clamped at 0:00.
     local neg_rid = first_negative_region_requirement(snap, components, active)
-    if neg_rid then
-        if allow_prompts and not is_recording() then
-            if offer_space_shift("followerspace@" .. tostring(neg_rid)) then return true, false end
-        end
-        return false, true
+    if neg_rid and allow_prompts and not is_recording() then
+        if offer_space_shift("followerspace@" .. tostring(neg_rid)) then return true end
     end
-    last_space_signature = ""
 
     if not is_recording() then
-        if delete_confirmed_orphans(snap, active) then return true, false end
+        if delete_confirmed_orphans(snap, active) then return true end
     end
 
     update_region_geometry_and_color(snap, components, active)
-    return false, false
+    return false
 end
 
 ------------------------------------------------------------
@@ -2335,24 +2691,19 @@ end
 ------------------------------------------------------------
 
 local function run_cycle(allow_prompts)
+    cycle_id = cycle_id + 1
     -- 1) local split/follower/collision state first;
-    -- 2) then insertion-ordered A/B/C organizer;
-    -- 3) finally helper markers and geometry normalization.
-    local changed, blocked = follower_pass(allow_prompts)
-    if changed or blocked then return end
-
-    process_pending_pairs()
-
-    -- Final follower pass after organizer reflow so geometry/color is immediately
-    -- normalized from the final project state.
-    local changed2, blocked2 = follower_pass(false)
-    if not changed2 and not blocked2 then
-        update_duration_helper_markers()
+    -- 2) then insertion-ordered A/B/C organizer (one chapter per pass);
+    -- 3) finally helper markers once everything has settled.
+    -- The pass limit guarantees termination even if REAPER refuses an edit.
+    for _ = 1, MAX_PASSES_PER_CYCLE do
+        if not follower_pass(allow_prompts) then
+            if not organizer_step(allow_prompts) then
+                update_duration_helper_markers()
+                return
+            end
+        end
     end
-end
-
-local function commit_prev_snapshot()
-    prev_snap = read_snapshot()
 end
 
 ------------------------------------------------------------
@@ -2369,19 +2720,30 @@ local function reinitialize_current_project(now)
 
     star_birth_seq = {}
     star_birth_counter = 0
+    star_last_pos = {}
+    star_tomb = {}
     local_split_pending = {}
 
-    last_collision_signature = ""
+    prompted_collisions = {}
     last_blocker_signature = ""
+    last_split_block_signature = ""
     last_space_signature = ""
     last_empty_signature = ""
+    last_multi_signature = ""
+    last_unsafe_signature = ""
 
     mouse_was_down = false
     last_mouse_release = -math.huge
+    recheck_at = nil
+
+    was_recording = is_recording()
+    rec_start_pos = was_recording and observe_recording_start() or nil
 
     -- First pass seeds persistent ownership from existing regions before any
-    -- orphan can be deleted.
-    run_cycle(false)
+    -- orphan can be deleted. Do not fight an Undo the user has just made.
+    if not own_action_on_redo_stack() then
+        run_cycle(not was_recording)
+    end
     commit_prev_snapshot()
 
     last_state = reaper.GetProjectStateChangeCount(proj)
@@ -2431,6 +2793,20 @@ local function loop()
         reaper.SetExtState(SYNC_SECTION, LEGACY_OWNER_KEY, LEGACY_EVICT_TOKEN, false)
     end
 
+    -- Recording start/stop bookkeeping.
+    local recording = is_recording()
+    if recording and not was_recording then
+        rec_start_pos = observe_recording_start()
+    elseif not recording and was_recording then
+        rec_start_pos = nil
+        record_session = record_session + 1
+        -- Re-check shortly after the stop even if nothing else changes (for
+        -- example when the take was discarded), but not instantly, so our
+        -- dialogs never race REAPER's own post-recording dialog.
+        recheck_at = now + 1.0
+    end
+    was_recording = recording
+
     local state = reaper.GetProjectStateChangeCount(proj)
     if state ~= observed_state then
         observed_state = state
@@ -2438,7 +2814,6 @@ local function loop()
     end
 
     if not mouse_gesture_active(now) then
-        local recording = is_recording()
         local star_count = prev_snap and #prev_snap.stars or 0
 
         local recording_due = recording and star_count >= 2
@@ -2448,10 +2823,18 @@ local function loop()
         local helper_due = recording and star_count >= 1
             and (now - last_helper_scan >= HELPER_SCAN_SEC)
         local settled_change = state ~= last_state and (now - state_changed_at >= SETTLE_SEC)
+        local recheck_due = recheck_at ~= nil and now >= recheck_at
 
-        if recording_due or star_due or helper_due or settled_change then
-            run_cycle(not recording)
-            commit_prev_snapshot()
+        if recording_due or star_due or helper_due or settled_change or recheck_due then
+            recheck_at = nil
+            if own_action_on_redo_stack() then
+                -- The user has just undone one of our edits. Do not fight the
+                -- Undo: only observe until the user makes the next change.
+                commit_prev_snapshot()
+            else
+                run_cycle(not recording)
+                commit_prev_snapshot()
+            end
 
             last_state = reaper.GetProjectStateChangeCount(proj)
             observed_state = last_state
@@ -2466,4 +2849,3 @@ local function loop()
 end
 
 loop()
-
