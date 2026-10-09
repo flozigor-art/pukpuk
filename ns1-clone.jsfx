@@ -1,4 +1,4 @@
-desc:NS1 Clone v3g (32-sample complementary suppressor)
+desc:NS1 Clone v3h (32-sample complementary suppressor)
 // Eight complementary bands, measured edge cleanup and 32-sample lookahead.
 // Independent behavioral approximation; contains no Waves source code.
 
@@ -144,33 +144,44 @@ loop(7,
   LP_FEED[i]=1-LP_KEEP[i];
   i+=1;
 );
-memset(LP_L,0,32);
-memset(BLOCK_PEAK,0,40);
-memset(RING_L,0,512);
-i=0;
-loop(8,
-  NOISE_ENV[i]=.000000001;
-  BAND_GAIN[i]=1;
-  PRE_ENV[i]=.000000001;
-  QUIET_ENV[i]=1;
-  i+=1;
+// Clears the audio path but keeps the learned noise floor.
+function restart_audio() local(i) (
+  memset(LP_L,0,32);
+  memset(BLOCK_PEAK,0,16);
+  memset(BAND_RATIO,0,8);
+  memset(RING_L,0,512);
+  voice_confidence=0;
+  zcr=0;
+  previous_positive=1;
+  zcr_crossings=0;
+  noise_accelerate=0;
+  learn_episode=0;
+  episode_age=0;
+  ring_pos=0;
+  mean_gain=1;
+  i=0;
+  loop(8,
+    BAND_GAIN[i]=min(baseline_gain,CAP_GAIN[i]);
+    i+=1;
+  );
 );
-voice_confidence=0;
-zcr=0;
-previous_positive=1;
-zcr_crossings=0;
-noise_accelerate=0;
-learn_episode=0;
-episode_age=0;
-ring_pos=0;
+
+// The noise floor survives transport restarts (ext_noinit) and is saved with
+// the project (@serialize); it is only learned from scratch on first load.
+!floor_ready ? (
+  i=0;
+  loop(8,
+    NOISE_ENV[i]=.000000001;
+    PRE_ENV[i]=.000000001;
+    QUIET_ENV[i]=1;
+    i+=1;
+  );
+  floor_ready=1;
+);
 blocks_seen=0;
-mean_gain=1;
 update_parameters();
-i=0;
-loop(8,
-  BAND_GAIN[i]=min(baseline_gain,CAP_GAIN[i]);
-  i+=1;
-);
+restart_audio();
+last_play_state=play_state;
 
 pdc_delay=BLOCK_SIZE;
 pdc_bot_ch=0;
@@ -178,6 +189,7 @@ pdc_top_ch=2;
 // Always process: a nonzero tail lets REAPER skip processing during silence,
 // which caused duplicated phrase starts on render together with RX plugins.
 ext_tail_size=0;
+ext_noinit=1;
 
 @slider
 update_parameters();
@@ -186,7 +198,29 @@ blocks_seen <= 0 ? (
   loop(8,BAND_GAIN[i]=min(baseline_gain,CAP_GAIN[i]);i+=1;);
 );
 
+@serialize
+// Reading: file_avail() >= 0. Older projects carry no state and keep the
+// floor learned in @init.
+reading=file_avail(0) >= 0;
+state_version=reading ? 0 : 1;
+file_var(0,state_version);
+state_version == 1 ? (
+  i=0;
+  loop(8,
+    saved_floor=NOISE_ENV[i];
+    file_var(0,saved_floor);
+    reading && saved_floor > 0 ? (
+      NOISE_ENV[i]=saved_floor;
+      QUIET_ENV[i]=saved_floor;
+    );
+    i+=1;
+  );
+);
+
 @block
+running=play_state == 1 || play_state == 5;
+running && !(last_play_state == 1 || last_play_state == 5) ? restart_audio();
+last_play_state=play_state;
 ext_gr_meter=20*log(max(mean_gain,.000000001))/log(10);
 
 @sample
