@@ -1,4 +1,4 @@
-desc:NS1 Clone v3f (32-sample complementary suppressor)
+desc:NS1 Clone v3g (32-sample complementary suppressor)
 // Eight complementary bands, measured edge cleanup and 32-sample lookahead.
 // Independent behavioral approximation; contains no Waves source code.
 
@@ -36,6 +36,8 @@ CAP_AMOUNT=136;
 CAP_DB=152;
 RING_L=256;
 RING_R=512;
+PRE_ENV=768;
+QUIET_ENV=776;
 
 function rate_block(ms) (
   1-exp(-BLOCK_SIZE/(max(ms,.001)*.001*srate));
@@ -102,6 +104,7 @@ function update_parameters() local(amount segment fraction i band db baseline_ra
   gain_open=rate_block(3.5);
   gain_close=rate_block(24);
   zcr_rate=rate_block(10);
+  episode_commit=1000*.001*srate/BLOCK_SIZE;
 );
 
 CROSSOVER[0]=60;
@@ -148,6 +151,8 @@ i=0;
 loop(8,
   NOISE_ENV[i]=.000000001;
   BAND_GAIN[i]=1;
+  PRE_ENV[i]=.000000001;
+  QUIET_ENV[i]=1;
   i+=1;
 );
 voice_confidence=0;
@@ -155,6 +160,8 @@ zcr=0;
 previous_positive=1;
 zcr_crossings=0;
 noise_accelerate=0;
+learn_episode=0;
+episode_age=0;
 ring_pos=0;
 blocks_seen=0;
 mean_gain=1;
@@ -260,6 +267,41 @@ ring_pos >= BLOCK_SIZE ? (
   ratio_conf=smoothstep(second_mid,2,5);
   zcr_conf=1-smoothstep(zcr,.12,.35);
   noise_accelerate=voice_confidence < .30 && active_bands >= 6 && zcr >= .20;
+
+  // Fast learning also catches breaths, rustle and fricatives next to speech.
+  // When voiced speech follows such an episode, return to the floor that
+  // preceded it; keep the learned floor once fast learning has been idle for
+  // a second without speech.
+  i=0;
+  loop(8,
+    BAND_RATIO[i] < 2 ? QUIET_ENV[i]=NOISE_ENV[i];
+    i+=1;
+  );
+  noise_accelerate ? (
+    !learn_episode ? (
+      learn_episode=1;
+      i=0;
+      loop(8,PRE_ENV[i]=min(QUIET_ENV[i],NOISE_ENV[i]);i+=1;);
+    );
+    episode_age=0;
+  ) : learn_episode ? (
+    episode_age+=1;
+  );
+  learn_episode ? (
+    i=0;
+    loop(8,PRE_ENV[i]=min(PRE_ENV[i],NOISE_ENV[i]);i+=1;);
+    p1=FAST_ENV[2]/max(PRE_ENV[2],.000000000001);
+    p2=FAST_ENV[3]/max(PRE_ENV[3],.000000000001);
+    p3=FAST_ENV[4]/max(PRE_ENV[4],.000000000001);
+    pre_mid=p1+p2+p3-min(p1,min(p2,p3))-max(p1,max(p2,p3));
+    zcr < .15 && pre_mid >= 5 ? (
+      i=0;
+      loop(8,NOISE_ENV[i]=min(NOISE_ENV[i],PRE_ENV[i]);i+=1;);
+      learn_episode=0;
+    ) : episode_age >= episode_commit ? (
+      learn_episode=0;
+    );
+  );
   raw_voice=ratio_conf*(.75+.25*zcr_conf);
   vr=raw_voice > voice_confidence ? voice_attack : voice_release;
   voice_confidence+=vr*(raw_voice-voice_confidence);
