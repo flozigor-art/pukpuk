@@ -1,0 +1,287 @@
+desc:NS1 Clone v3f (32-sample complementary suppressor)
+// Eight complementary bands, measured edge cleanup and 32-sample lookahead.
+// Independent behavioral approximation; contains no Waves source code.
+
+tags:processing noise suppression low-latency experimental
+author:Aleksandr Startsev / OpenAI Codex
+
+slider1:50<0,100,0.1>Suppression Amount
+
+in_pin:Left input
+in_pin:Right input
+out_pin:Left output
+out_pin:Right output
+
+options:maxmem=2048
+
+@init
+
+BLOCK_SIZE=32;
+CROSSOVER=0;
+LP_KEEP=8;
+LP_FEED=16;
+LP_L=24;
+LP_R=32;
+BAND_L=40;
+BAND_R=48;
+BLOCK_PEAK=56;
+FAST_ENV=64;
+NOISE_ENV=72;
+BAND_RATIO=80;
+BAND_GAIN=88;
+CAP_GAIN=96;
+AMOUNT_POINT=112;
+SCALE_POINT=124;
+CAP_AMOUNT=136;
+CAP_DB=152;
+RING_L=256;
+RING_R=512;
+
+function rate_block(ms) (
+  1-exp(-BLOCK_SIZE/(max(ms,.001)*.001*srate));
+);
+
+function fourth(x) local(y) (
+  y=x*x;
+  y*y;
+);
+
+function smoothstep(x lo hi) local(t) (
+  t=min(1,max(0,(x-lo)/(hi-lo)));
+  t*t*(3-2*t);
+);
+
+function set12(ptr a b c d e f g h i j k l) (
+  ptr[0]=a; ptr[1]=b; ptr[2]=c; ptr[3]=d;
+  ptr[4]=e; ptr[5]=f; ptr[6]=g; ptr[7]=h;
+  ptr[8]=i; ptr[9]=j; ptr[10]=k; ptr[11]=l;
+);
+
+function update_parameters() local(amount segment fraction i band db baseline_ratio base_reduction) (
+  amount=min(100,max(0,slider1));
+  segment=0;
+  i=0;
+  loop(7,
+    amount >= AMOUNT_POINT[i+1] ? segment=i+1;
+    i+=1;
+  );
+  segment=min(segment,6);
+  fraction=(amount-AMOUNT_POINT[segment]) /
+           max(AMOUNT_POINT[segment+1]-AMOUNT_POINT[segment],.000001);
+  amount_scale=SCALE_POINT[segment]*(1-fraction)+
+               SCALE_POINT[segment+1]*fraction;
+  band_floor=amount <= 0 ? 1 : 10^(-18.6/20);
+  baseline_ratio=1/max(amount_scale,.000001);
+  base_reduction=1/(1+fourth(baseline_ratio/3));
+  baseline_gain=1-(1-band_floor)*base_reduction;
+
+  cap_segment=0;
+  i=0;
+  loop(11,
+    amount >= CAP_AMOUNT[i+1] ? cap_segment=i+1;
+    i+=1;
+  );
+  cap_segment=min(cap_segment,10);
+  cap_fraction=(amount-CAP_AMOUNT[cap_segment]) /
+               max(CAP_AMOUNT[cap_segment+1]-CAP_AMOUNT[cap_segment],.000001);
+  band=0;
+  loop(8,
+    db=CAP_DB[band*12+cap_segment]*(1-cap_fraction)+
+       CAP_DB[band*12+cap_segment+1]*cap_fraction;
+    CAP_GAIN[band]=10^(db/20);
+    band+=1;
+  );
+
+  env_attack=rate_block(.10);
+  env_release=rate_block(8.5);
+  noise_rise=rate_block(1000);
+  noise_fall=rate_block(50);
+  noise_startup=rate_block(20);
+  voice_attack=rate_block(2);
+  voice_release=rate_block(20);
+  gain_open=rate_block(3.5);
+  gain_close=rate_block(24);
+  zcr_rate=rate_block(10);
+);
+
+CROSSOVER[0]=60;
+CROSSOVER[1]=120;
+CROSSOVER[2]=318.08;
+CROSSOVER[3]=930.61;
+CROSSOVER[4]=2725.29;
+CROSSOVER[5]=7984.37;
+CROSSOVER[6]=16000;
+
+AMOUNT_POINT[0]=0; AMOUNT_POINT[1]=5; AMOUNT_POINT[2]=10;
+AMOUNT_POINT[3]=20; AMOUNT_POINT[4]=30; AMOUNT_POINT[5]=50;
+AMOUNT_POINT[6]=75; AMOUNT_POINT[7]=100;
+SCALE_POINT[0]=.05; SCALE_POINT[1]=.20; SCALE_POINT[2]=.32;
+SCALE_POINT[3]=.52; SCALE_POINT[4]=.75; SCALE_POINT[5]=1;
+SCALE_POINT[6]=1.3; SCALE_POINT[7]=1.7;
+
+CAP_AMOUNT[0]=0; CAP_AMOUNT[1]=5; CAP_AMOUNT[2]=10; CAP_AMOUNT[3]=20;
+CAP_AMOUNT[4]=30; CAP_AMOUNT[5]=40; CAP_AMOUNT[6]=50; CAP_AMOUNT[7]=60;
+CAP_AMOUNT[8]=70; CAP_AMOUNT[9]=80; CAP_AMOUNT[10]=90; CAP_AMOUNT[11]=100;
+
+// Maximum open-band gains measured from NS1 during speech.  Rows correspond
+// to <60, 60-120, 120-318, 318-930, 930-2725, 2725-7984,
+// 7984-16000 and >16000 Hz.
+set12(CAP_DB+ 0, 0,-2.34,-4.56,-8.38,-12.85,-14.65,-15.56,-16.37,-17.41,-18.19,-21.97,-25.08);
+set12(CAP_DB+12, 0,-.10,-.15,-.22,-.30,-.40,-.50,-.60,-.75,-.88,-1.81,-3.12);
+set12(CAP_DB+24, 0,-.03,-.05,-.08,-.12,-.15,-.18,-.22,-.30,-.40,-.50,-.69);
+set12(CAP_DB+36, 0,-.02,-.03,-.05,-.09,-.10,-.13,-.15,-.17,-.18,-.19,-.20);
+set12(CAP_DB+48, 0,-.03,-.05,-.08,-.12,-.15,-.18,-.20,-.22,-.24,-.26,-.29);
+set12(CAP_DB+60, 0,-.10,-.20,-.40,-.70,-.80,-.90,-1,-1.10,-1.20,-1.50,-2);
+set12(CAP_DB+72, 0,-.11,-.34,-1.71,-1.91,-1.94,-1.96,-1.99,-2.05,-2.11,-3.05,-5.42);
+set12(CAP_DB+84, 0,-1.86,-3.41,-3.98,-5.06,-5.61,-6.15,-6.72,-7.35,-8.03,-13.09,-19.65);
+
+i=0;
+loop(7,
+  LP_KEEP[i]=exp(-2*$pi*min(CROSSOVER[i],srate*.45)/srate);
+  LP_FEED[i]=1-LP_KEEP[i];
+  i+=1;
+);
+memset(LP_L,0,32);
+memset(BLOCK_PEAK,0,40);
+memset(RING_L,0,512);
+i=0;
+loop(8,
+  NOISE_ENV[i]=.000000001;
+  BAND_GAIN[i]=1;
+  i+=1;
+);
+voice_confidence=0;
+zcr=0;
+previous_positive=1;
+zcr_crossings=0;
+noise_accelerate=0;
+ring_pos=0;
+blocks_seen=0;
+mean_gain=1;
+update_parameters();
+i=0;
+loop(8,
+  BAND_GAIN[i]=min(baseline_gain,CAP_GAIN[i]);
+  i+=1;
+);
+
+pdc_delay=BLOCK_SIZE;
+pdc_bot_ch=0;
+pdc_top_ch=2;
+// Always process: a nonzero tail lets REAPER skip processing during silence,
+// which caused duplicated phrase starts on render together with RX plugins.
+ext_tail_size=0;
+
+@slider
+update_parameters();
+blocks_seen <= 0 ? (
+  i=0;
+  loop(8,BAND_GAIN[i]=min(baseline_gain,CAP_GAIN[i]);i+=1;);
+);
+
+@block
+ext_gr_meter=20*log(max(mean_gain,.000000001))/log(10);
+
+@sample
+
+dry_l=spl0;
+dry_r=spl1;
+
+// Seven parallel low-passes create eight exactly complementary bands.
+previous_low_l=0;
+previous_low_r=0;
+i=0;
+loop(7,
+  low_l=LP_FEED[i]*dry_l+LP_KEEP[i]*LP_L[i];
+  low_r=LP_FEED[i]*dry_r+LP_KEEP[i]*LP_R[i];
+  LP_L[i]=low_l;
+  LP_R[i]=low_r;
+  i == 0 ? (
+    BAND_L[i]=low_l;
+    BAND_R[i]=low_r;
+  ) : (
+    BAND_L[i]=low_l-previous_low_l;
+    BAND_R[i]=low_r-previous_low_r;
+  );
+  previous_low_l=low_l;
+  previous_low_r=low_r;
+  i+=1;
+);
+BAND_L[7]=dry_l-previous_low_l;
+BAND_R[7]=dry_r-previous_low_r;
+
+zcr_sample=BAND_L[2]+BAND_L[3]+BAND_L[4];
+current_positive=zcr_sample >= 0;
+current_positive != previous_positive ? zcr_crossings+=1;
+previous_positive=current_positive;
+
+// Read the delayed band, then replace the same slot with the current one.
+wet_l=0;
+wet_r=0;
+i=0;
+loop(8,
+  index=i*BLOCK_SIZE+ring_pos;
+  output_gain=slider1 <= 0 ? 1 : BAND_GAIN[i];
+  wet_l+=RING_L[index]*output_gain;
+  wet_r+=RING_R[index]*output_gain;
+  RING_L[index]=BAND_L[i];
+  RING_R[index]=BAND_R[i];
+  linked_abs=.5*(abs(BAND_L[i])+abs(BAND_R[i]))+.000000000001;
+  BLOCK_PEAK[i]=max(BLOCK_PEAK[i],linked_abs);
+  i+=1;
+);
+
+ring_pos+=1;
+ring_pos >= BLOCK_SIZE ? (
+  ring_pos=0;
+  blocks_seen+=1;
+  instantaneous_zcr=zcr_crossings/BLOCK_SIZE;
+  zcr+=zcr_rate*(instantaneous_zcr-zcr);
+  zcr_crossings=0;
+
+  active_bands=0;
+  i=0;
+  loop(8,
+    er=BLOCK_PEAK[i] > FAST_ENV[i] ? env_attack : env_release;
+    FAST_ENV[i]+=er*(BLOCK_PEAK[i]-FAST_ENV[i]);
+    upward_rate=noise_accelerate ? noise_startup : noise_rise;
+    nr=FAST_ENV[i] <= NOISE_ENV[i] ? noise_fall : upward_rate*(1-voice_confidence);
+    NOISE_ENV[i]+=nr*(FAST_ENV[i]-NOISE_ENV[i]);
+    BAND_RATIO[i]=FAST_ENV[i]/max(NOISE_ENV[i],.000000000001);
+    BAND_RATIO[i] >= 2 ? active_bands+=1;
+    BLOCK_PEAK[i]=0;
+    i+=1;
+  );
+
+  r1=BAND_RATIO[2];
+  r2=BAND_RATIO[3];
+  r3=BAND_RATIO[4];
+  second_mid=r1+r2+r3-min(r1,min(r2,r3))-max(r1,max(r2,r3));
+  ratio_conf=smoothstep(second_mid,2,5);
+  zcr_conf=1-smoothstep(zcr,.12,.35);
+  noise_accelerate=voice_confidence < .30 && active_bands >= 6 && zcr >= .20;
+  raw_voice=ratio_conf*(.75+.25*zcr_conf);
+  vr=raw_voice > voice_confidence ? voice_attack : voice_release;
+  voice_confidence+=vr*(raw_voice-voice_confidence);
+
+  mean_gain=0;
+  i=0;
+  loop(8,
+    effective=BAND_RATIO[i]/max(amount_scale,.000001);
+    reduction=1/(1+fourth(effective/3));
+    adaptive_gain=1-(1-band_floor)*reduction;
+    evidence=smoothstep(BAND_RATIO[i],1.5,5);
+    openness=min(.95,voice_confidence*evidence);
+    target=baseline_gain+(adaptive_gain-baseline_gain)*openness;
+    target=min(target,CAP_GAIN[i]);
+    gr=target > BAND_GAIN[i] ? gain_open : gain_close;
+    BAND_GAIN[i]+=gr*(target-BAND_GAIN[i]);
+    mean_gain+=BAND_GAIN[i];
+    i+=1;
+  );
+  mean_gain/=8;
+);
+
+spl0=wet_l;
+spl1=wet_r;
+
